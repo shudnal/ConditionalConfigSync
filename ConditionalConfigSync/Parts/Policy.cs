@@ -16,6 +16,51 @@ public partial class ConditionalConfigSync
         ForceClientControlled,
     }
 
+    private sealed class SyncPolicyRecord
+    {
+        internal readonly string DisplayText;
+        internal readonly string? Key;
+        internal readonly ConfigPolicyOverride PolicyOverride;
+        internal readonly string? Error;
+
+        internal SyncPolicyRecord(string displayText, string? key, ConfigPolicyOverride policyOverride, string? error)
+        {
+            DisplayText = displayText;
+            Key = key;
+            PolicyOverride = policyOverride;
+            Error = error;
+        }
+    }
+
+    private sealed class HiddenPolicyRecord
+    {
+        internal readonly string DisplayText;
+        internal readonly string? Key;
+        internal readonly string? Error;
+
+        internal HiddenPolicyRecord(string displayText, string? key, string? error)
+        {
+            DisplayText = displayText;
+            Key = key;
+            Error = error;
+        }
+    }
+
+    private enum PolicyTargetFailure
+    {
+        None,
+        Mod,
+        Section,
+        Config,
+    }
+
+    private sealed class PolicyTargetResolution
+    {
+        internal ConditionalConfigSync? ConfigSync;
+        internal readonly List<OwnConfigEntryBase> Configs = new();
+        internal PolicyTargetFailure Failure;
+    }
+
     private const string SyncPolicyFileName = "ConditionalConfigSync.SyncPolicy.cfg";
 
     private const string HiddenConfigsFileName = "ConditionalConfigSync.HiddenConfigs.cfg";
@@ -39,8 +84,6 @@ public partial class ConditionalConfigSync
     private static Dictionary<string, ConfigPolicyOverride> syncPolicy = new(StringComparer.OrdinalIgnoreCase);
 
     private static HashSet<string> hiddenConfigPolicy = new(StringComparer.OrdinalIgnoreCase);
-
-    private bool invalidLockingPolicyWarningActive;
 
     private static string SyncPolicyPath => Path.Combine(ConfigDirectoryPath, SyncPolicyFileName);
 
@@ -109,7 +152,13 @@ public partial class ConditionalConfigSync
         ThreadPool.QueueUserWorkItem(_ =>
         {
             Thread.Sleep(500);
-            if (!TryReadPolicyFiles(createIfMissing: false, out Dictionary<string, ConfigPolicyOverride> newSyncPolicy, out HashSet<string> newHiddenPolicy, out string? error))
+            if (!TryReadPolicyFiles(
+                    createIfMissing: false,
+                    out Dictionary<string, ConfigPolicyOverride> newSyncPolicy,
+                    out HashSet<string> newHiddenPolicy,
+                    out List<SyncPolicyRecord> syncRecords,
+                    out List<HiddenPolicyRecord> hiddenRecords,
+                    out string? error))
             {
                 lock (policyLock)
                 {
@@ -125,13 +174,19 @@ public partial class ConditionalConfigSync
             }
 
             EnqueueMainThread(() =>
-                ApplyPolicyFiles(newSyncPolicy, newHiddenPolicy, quiet: false, source: "policy file watcher", generation: generation));
+                ApplyPolicyFiles(newSyncPolicy, newHiddenPolicy, syncRecords, hiddenRecords, quiet: false, source: "policy file watcher", generation: generation));
         });
     }
 
     private static bool LoadPolicyFiles(bool createIfMissing, bool quiet, string source)
     {
-        if (!TryReadPolicyFiles(createIfMissing, out Dictionary<string, ConfigPolicyOverride> newSyncPolicy, out HashSet<string> newHiddenPolicy, out string? error))
+        if (!TryReadPolicyFiles(
+                createIfMissing,
+                out Dictionary<string, ConfigPolicyOverride> newSyncPolicy,
+                out HashSet<string> newHiddenPolicy,
+                out List<SyncPolicyRecord> syncRecords,
+                out List<HiddenPolicyRecord> hiddenRecords,
+                out string? error))
         {
             LogSource.LogWarning($"[Policy] Failed to read policy files: {error}");
             return false;
@@ -140,11 +195,11 @@ public partial class ConditionalConfigSync
         long generation = Interlocked.Increment(ref policyReadGeneration);
         if (IsMainThread)
         {
-            ApplyPolicyFiles(newSyncPolicy, newHiddenPolicy, quiet, source, generation);
+            ApplyPolicyFiles(newSyncPolicy, newHiddenPolicy, syncRecords, hiddenRecords, quiet, source, generation);
         }
         else
         {
-            EnqueueMainThread(() => ApplyPolicyFiles(newSyncPolicy, newHiddenPolicy, quiet, source, generation));
+            EnqueueMainThread(() => ApplyPolicyFiles(newSyncPolicy, newHiddenPolicy, syncRecords, hiddenRecords, quiet, source, generation));
         }
 
         return true;
@@ -154,10 +209,14 @@ public partial class ConditionalConfigSync
         bool createIfMissing,
         out Dictionary<string, ConfigPolicyOverride> newSyncPolicy,
         out HashSet<string> newHiddenPolicy,
+        out List<SyncPolicyRecord> syncRecords,
+        out List<HiddenPolicyRecord> hiddenRecords,
         out string? error)
     {
         newSyncPolicy = new Dictionary<string, ConfigPolicyOverride>(StringComparer.OrdinalIgnoreCase);
         newHiddenPolicy = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        syncRecords = new List<SyncPolicyRecord>();
+        hiddenRecords = new List<HiddenPolicyRecord>();
         error = null;
 
         try
@@ -170,8 +229,8 @@ public partial class ConditionalConfigSync
 
             // Missing policy files are accepted only after the same stability window as a changed file. This avoids
             // treating an editor's short atomic replace/rename gap as an intentional empty policy.
-            newSyncPolicy = ReadSyncPolicyFile(SyncPolicyPath);
-            newHiddenPolicy = ReadHiddenConfigsFile(HiddenConfigsPath);
+            newSyncPolicy = ReadSyncPolicyFile(SyncPolicyPath, out syncRecords);
+            newHiddenPolicy = ReadHiddenConfigsFile(HiddenConfigsPath, out hiddenRecords);
             return true;
         }
         catch (Exception e)
@@ -184,6 +243,8 @@ public partial class ConditionalConfigSync
     private static void ApplyPolicyFiles(
         Dictionary<string, ConfigPolicyOverride> newSyncPolicy,
         HashSet<string> newHiddenPolicy,
+        List<SyncPolicyRecord> syncRecords,
+        List<HiddenPolicyRecord> hiddenRecords,
         bool quiet,
         string source,
         long generation)
@@ -201,6 +262,8 @@ public partial class ConditionalConfigSync
             syncPolicy = newSyncPolicy;
             hiddenConfigPolicy = newHiddenPolicy;
         }
+
+        LogPolicyFileRecords(syncRecords, hiddenRecords, source);
 
         if (!quiet)
         {
@@ -235,9 +298,10 @@ public partial class ConditionalConfigSync
         }
     }
 
-    private static Dictionary<string, ConfigPolicyOverride> ReadSyncPolicyFile(string path)
+    private static Dictionary<string, ConfigPolicyOverride> ReadSyncPolicyFile(string path, out List<SyncPolicyRecord> records)
     {
         Dictionary<string, ConfigPolicyOverride> result = new(StringComparer.OrdinalIgnoreCase);
+        records = new List<SyncPolicyRecord>();
         foreach (string rawLine in ReadAllLinesStable(path, missingIsEmpty: true))
         {
             string line = StripPolicyComment(rawLine).Trim();
@@ -249,31 +313,41 @@ public partial class ConditionalConfigSync
             char prefix = line[0];
             if (prefix != '+' && prefix != '-')
             {
-                LogSource.LogWarning($"[Policy] Ignoring malformed line in {SyncPolicyFileName}: {rawLine}");
+                records.Add(new SyncPolicyRecord(line, null, ConfigPolicyOverride.Default, "expected '+' or '-'"));
                 continue;
             }
 
             string key = line.Substring(1).Trim();
             if (key.Length == 0)
             {
+                records.Add(new SyncPolicyRecord(line, null, ConfigPolicyOverride.Default, "config record is empty"));
                 continue;
             }
 
-            result[key] = prefix == '+' ? ConfigPolicyOverride.ForceServerControlled : ConfigPolicyOverride.ForceClientControlled;
+            ConfigPolicyOverride policyOverride = prefix == '+'
+                ? ConfigPolicyOverride.ForceServerControlled
+                : ConfigPolicyOverride.ForceClientControlled;
+
+            records.Add(new SyncPolicyRecord(key, key, policyOverride, null));
+            result[key] = policyOverride;
         }
         return result;
     }
 
-    private static HashSet<string> ReadHiddenConfigsFile(string path)
+    private static HashSet<string> ReadHiddenConfigsFile(string path, out List<HiddenPolicyRecord> records)
     {
         HashSet<string> result = new(StringComparer.OrdinalIgnoreCase);
+        records = new List<HiddenPolicyRecord>();
         foreach (string rawLine in ReadAllLinesStable(path, missingIsEmpty: true))
         {
             string key = StripPolicyComment(rawLine).Trim();
-            if (key.Length > 0)
+            if (key.Length == 0)
             {
-                result.Add(key);
+                continue;
             }
+
+            records.Add(new HiddenPolicyRecord(key, key, null));
+            result.Add(key);
         }
         return result;
     }
@@ -330,7 +404,6 @@ public partial class ConditionalConfigSync
             changed.Add(config);
             if (effectivePolicyChanged)
             {
-                LogPolicyChange(config, oldEffectiveServerControlled, newServerControlled, oldEffectiveHidden, newHidden, source);
                 policyTransitions.Add(new PolicyStateChangedEventArgs(
                     config,
                     oldEffectiveServerControlled,
@@ -340,10 +413,6 @@ public partial class ConditionalConfigSync
                     source));
             }
         }
-
-        UpdateInvalidLockingPolicyWarning(source);
-        LogUnknownPolicyKeysIfAny(source);
-        LogIgnoredFixedModePolicyRules(source);
 
         if (changed.Count > 0)
         {
@@ -364,77 +433,195 @@ public partial class ConditionalConfigSync
         }
     }
 
-    private void LogPolicyChange(OwnConfigEntryBase config, bool oldServerControlled, bool newServerControlled, bool oldHidden, bool newHidden, string source)
+    private static void LogPolicyFileRecords(
+        IReadOnlyList<SyncPolicyRecord> syncRecords,
+        IReadOnlyList<HiddenPolicyRecord> hiddenRecords,
+        string source)
     {
-        string key = GetPolicyKey(config);
-        if (oldServerControlled != newServerControlled)
+        LogSyncPolicyRecords(syncRecords, source);
+        LogHiddenPolicyRecords(hiddenRecords, source);
+    }
+
+    private static void LogSyncPolicyRecords(IReadOnlyList<SyncPolicyRecord> records, string source)
+    {
+        Dictionary<string, int> lastRecordIndexes = new(StringComparer.OrdinalIgnoreCase);
+        for (int index = 0; index < records.Count; ++index)
         {
-            ConfigPolicyOverride policyOverride = GetPolicyOverride(config, out string? matchedKey);
-            string policyName = policyOverride == ConfigPolicyOverride.ForceServerControlled ? "ForceServerControlled" : policyOverride == ConfigPolicyOverride.ForceClientControlled ? "ForceClientControlled" : "Default";
-            string matchedRule = matchedKey ?? "none";
-            LogSource.LogInfo($"[{GetDebugModName()}][{GetDebugSide()}][Policy] {key}: {(oldServerControlled ? "ServerControlled" : "ClientControlled")} -> {(newServerControlled ? "ServerControlled" : "ClientControlled")}, source={source}, mode={config.SyncMode}, override={policyName}, rule={matchedRule}");
-            if (policyOverride != ConfigPolicyOverride.Default)
+            if (records[index].Key != null)
             {
-                LogSource.LogWarning($"[{GetDebugModName()}][{GetDebugSide()}][Policy] {policyName} may change mod behavior: {key}");
+                lastRecordIndexes[records[index].Key!] = index;
             }
         }
 
-        if (oldHidden != newHidden)
+        for (int index = 0; index < records.Count; ++index)
         {
-            LogSource.LogInfo($"[{GetDebugModName()}][{GetDebugSide()}][Policy] {key}: hidden={oldHidden} -> {newHidden}, source={source}");
-        }
-    }
+            SyncPolicyRecord record = records[index];
+            string sourceSuffix = GetPolicySourceSuffix(source);
+            if (record.Error != null || record.Key == null)
+            {
+                LogSource.LogWarning($"[SyncPolicy] {record.DisplayText}: {record.Error}{sourceSuffix}");
+                continue;
+            }
 
-    private void UpdateInvalidLockingPolicyWarning(string source)
-    {
-        bool invalidOverride = lockedConfig != null
-                               && GetPolicyOverride(lockedConfig, out _) == ConfigPolicyOverride.ForceClientControlled;
-
-        if (invalidOverride && !invalidLockingPolicyWarningActive)
-        {
-            LogSource.LogWarning($"[{GetDebugModName()}][{GetDebugSide()}][Policy] ForceClientControlled is ignored for locking config {GetPolicyKey(lockedConfig!)}. The locking config is always server-controlled and may only be changed by a server administrator. source={source}");
-        }
-
-        invalidLockingPolicyWarningActive = invalidOverride;
-    }
-
-    private void LogUnknownPolicyKeysIfAny(string source)
-    {
-        if (!isServer || !GameReflection.HasZNet)
-        {
-            return;
-        }
-
-        HashSet<string> knownKeys = new(allConfigs.SelectMany(config => new[] { GetPolicyKey(config), GetPolicySectionKey(config) }), StringComparer.OrdinalIgnoreCase);
-        List<string> unknownKeys;
-        lock (policyLock)
-        {
-            unknownKeys = syncPolicy.Keys.Concat(hiddenConfigPolicy)
-                .Where(key => !knownKeys.Contains(key) && key.StartsWith(Name + ".", StringComparison.OrdinalIgnoreCase))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-        }
-
-        foreach (string key in unknownKeys)
-        {
-            LogSource.LogWarning($"[{GetDebugModName()}][{GetDebugSide()}][Policy] Unknown policy key for this mod: {key}, source={source}");
-        }
-    }
-
-    private void LogIgnoredFixedModePolicyRules(string source)
-    {
-        foreach (OwnConfigEntryBase config in allConfigs.Where(config => config != lockedConfig && config.SyncMode != ConfigSyncMode.Conditional))
-        {
-            ConfigPolicyOverride policyOverride = GetPolicyOverride(config, out string? matchedKey);
-            if (policyOverride == ConfigPolicyOverride.Default)
+            PolicyTargetResolution resolution = ResolvePolicyTarget(record.Key);
+            if (LogPolicyTargetFailure(resolution, record.DisplayText, "SyncPolicy", sourceSuffix))
             {
                 continue;
             }
 
-            LogSource.LogWarning(
-                $"[{GetDebugModName()}][{GetDebugSide()}][Policy] Rule '{matchedKey}' is ignored for {GetPolicyKey(config)} " +
-                $"because its mode is {config.SyncMode}. source={source}");
+            ConditionalConfigSync configSync = resolution.ConfigSync!;
+            string prefix = $"[SyncPolicy][{configSync.GetDebugModName()}]";
+            string policyName = GetPolicyOverrideName(record.PolicyOverride);
+
+            if (lastRecordIndexes[record.Key] != index)
+            {
+                LogSource.LogWarning($"{prefix} {record.DisplayText}: overridden by a later rule{sourceSuffix}");
+                continue;
+            }
+
+            List<OwnConfigEntryBase> effectiveConfigs = resolution.Configs
+                .Where(config => configSync.GetPolicyOverride(config, out string? matchedKey)
+                                 != ConfigPolicyOverride.Default
+                                 && string.Equals(matchedKey, record.Key, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (effectiveConfigs.Count == 0)
+            {
+                LogSource.LogInfo($"{prefix} {record.DisplayText}: {policyName} has no effect on mod behavior{sourceSuffix}");
+                continue;
+            }
+
+            List<OwnConfigEntryBase> conditionalConfigs = effectiveConfigs
+                .Where(config => config.SyncMode == ConfigSyncMode.Conditional)
+                .ToList();
+
+            if (conditionalConfigs.Count == 0)
+            {
+                ConfigSyncMode[] modes = effectiveConfigs.Select(config => config.SyncMode).Distinct().ToArray();
+                string reason = modes.Length == 1
+                    ? $"ignored because its mode is {modes[0]}"
+                    : "ignored because matching configs are not Conditional";
+                LogSource.LogInfo($"{prefix} {record.DisplayText}: {reason}{sourceSuffix}");
+                continue;
+            }
+
+            bool targetServerControlled = record.PolicyOverride == ConfigPolicyOverride.ForceServerControlled;
+            bool changesBehavior = conditionalConfigs.Any(config => config.SynchronizedConfig != targetServerControlled);
+            if (changesBehavior)
+            {
+                LogSource.LogWarning($"{prefix} {record.DisplayText}: {policyName} changes mod behavior{sourceSuffix}");
+            }
+            else
+            {
+                LogSource.LogInfo($"{prefix} {record.DisplayText}: {policyName} has no effect on mod behavior{sourceSuffix}");
+            }
         }
+    }
+
+    private static void LogHiddenPolicyRecords(IReadOnlyList<HiddenPolicyRecord> records, string source)
+    {
+        foreach (HiddenPolicyRecord record in records)
+        {
+            string sourceSuffix = GetPolicySourceSuffix(source);
+            if (record.Error != null || record.Key == null)
+            {
+                LogSource.LogWarning($"[HiddenConfigs] {record.DisplayText}: {record.Error}{sourceSuffix}");
+                continue;
+            }
+
+            PolicyTargetResolution resolution = ResolvePolicyTarget(record.Key);
+            if (LogPolicyTargetFailure(resolution, record.DisplayText, "HiddenConfigs", sourceSuffix))
+            {
+                continue;
+            }
+
+            ConditionalConfigSync configSync = resolution.ConfigSync!;
+            LogSource.LogWarning(
+                $"[HiddenConfigs][{configSync.GetDebugModName()}] {record.DisplayText}: " +
+                $"is now hidden in configuration manager{sourceSuffix}");
+        }
+    }
+
+    private static bool LogPolicyTargetFailure(
+        PolicyTargetResolution resolution,
+        string displayText,
+        string area,
+        string sourceSuffix)
+    {
+        if (resolution.Failure == PolicyTargetFailure.None)
+        {
+            return false;
+        }
+
+        if (resolution.Failure == PolicyTargetFailure.Mod)
+        {
+            LogSource.LogWarning($"[{area}] {displayText}: can not find mod by GUID{sourceSuffix}");
+            return true;
+        }
+
+        string modName = resolution.ConfigSync!.GetDebugModName();
+        string reason = resolution.Failure == PolicyTargetFailure.Section
+            ? "can not find config section"
+            : "can not find config name";
+        LogSource.LogWarning($"[{area}][{modName}] {displayText}: {reason}{sourceSuffix}");
+        return true;
+    }
+
+    private static PolicyTargetResolution ResolvePolicyTarget(string key)
+    {
+        PolicyTargetResolution result = new();
+        ConditionalConfigSync? configSync = configSyncs
+            .Where(sync => key.StartsWith(sync.Name + ".", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(sync => sync.Name.Length)
+            .FirstOrDefault();
+
+        if (configSync == null)
+        {
+            result.Failure = PolicyTargetFailure.Mod;
+            return result;
+        }
+
+        result.ConfigSync = configSync;
+
+        OwnConfigEntryBase? exactConfig = configSync.allConfigs.FirstOrDefault(config =>
+            string.Equals(configSync.GetPolicyKey(config), key, StringComparison.OrdinalIgnoreCase));
+        if (exactConfig != null)
+        {
+            result.Configs.Add(exactConfig);
+            return result;
+        }
+
+        List<OwnConfigEntryBase> sectionConfigs = configSync.allConfigs
+            .Where(config => string.Equals(configSync.GetPolicySectionKey(config), key, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (sectionConfigs.Count > 0)
+        {
+            result.Configs.AddRange(sectionConfigs);
+            return result;
+        }
+
+        string remainder = key.Substring(configSync.Name.Length + 1);
+        bool sectionFound = configSync.allConfigs
+            .Select(config => config.BaseConfig.Definition.Section)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Any(section => remainder.StartsWith(section + ".", StringComparison.OrdinalIgnoreCase));
+
+        result.Failure = sectionFound ? PolicyTargetFailure.Config : PolicyTargetFailure.Section;
+        return result;
+    }
+
+    private static string GetPolicyOverrideName(ConfigPolicyOverride policyOverride)
+    {
+        return policyOverride == ConfigPolicyOverride.ForceServerControlled
+            ? "ForceServerControlled"
+            : "ForceClientControlled";
+    }
+
+    private static string GetPolicySourceSuffix(string source)
+    {
+        return IsDebugActive && EffectiveDebugLevel >= ConditionalConfigSyncDebugLevel.Verbose
+            ? $", source={source}"
+            : "";
     }
 
     private static List<string> ValidatePolicyFiles(out int syncRuleCount, out int hiddenRuleCount)

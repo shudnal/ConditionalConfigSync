@@ -464,7 +464,6 @@ public partial class ConditionalConfigSync
         lockingConfig.SettingChanged += (_, _) => LockedConfigChanged?.Invoke();
         LockedConfigChanged -= ServerLockedSettingChanged;
         LockedConfigChanged += ServerLockedSettingChanged;
-        UpdateInvalidLockingPolicyWarning("locking config registration");
 
         return (SyncedConfigEntry<T>)lockedConfig;
     }
