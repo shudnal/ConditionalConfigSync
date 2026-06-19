@@ -361,3 +361,12 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+/ConditionalConfigSync.Plugin/package/github/ConditionalConfigSync.dll
+/ConditionalConfigSync.Plugin/package/github/ConditionalConfigSync.Plugin.dll
+/ConditionalConfigSync.Plugin/package/github/ConditionalConfigSync.xml
+/ConditionalConfigSync.Plugin/package/github/SHA256SUMS.txt
+/ConditionalConfigSync.Plugin/package/thunderstore/ConditionalConfigSync.dll
+/ConditionalConfigSync.Plugin/package/thunderstore/ConditionalConfigSync.Plugin.dll
+/ConditionalConfigSync.Plugin/package/thunderstore/ConditionalConfigSync.xml
+/ConditionalConfigSync.Plugin/package/thunderstore/SHA256SUMS.txt
+/ConditionalConfigSync.Plugin/package/ConditionalConfigSync.zip
