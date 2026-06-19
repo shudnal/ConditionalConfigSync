@@ -1,0 +1,21 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <!-- C# 11 is intentional: keep explicit constructors and collection initialization instead of C# 12 style-only rewrites. -->
+    <LangVersion>11.0</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <!-- Keep nullable annotations in source, but disable flow-analysis warnings for Unity/BepInEx assemblies without nullable metadata. -->
+    <Nullable>annotations</Nullable>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <Deterministic>true</Deterministic>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+
+    <!-- Symbols are intentionally not shipped. XML documentation is enough for IntelliSense. -->
+    <DebugSymbols>false</DebugSymbols>
+    <DebugType>none</DebugType>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+    <GameAssembliesPath>$(MSBuildThisFileDirectory)..\Assemblies</GameAssembliesPath>
+    <ManagersAssembliesPath Condition="'$(ManagersAssembliesPath)' == ''">D:\work\source\repos\Assemblies\Managers</ManagersAssembliesPath>
+  </PropertyGroup>
+</Project>

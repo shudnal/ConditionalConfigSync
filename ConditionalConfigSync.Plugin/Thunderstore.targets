@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <PropertyGroup>
+    <ThunderstorePackageName>ConditionalConfigSync</ThunderstorePackageName>
+    <ThunderstorePackageDir>$(MSBuildProjectDirectory)\package\thunderstore\</ThunderstorePackageDir>
+    <ThunderstoreZipPath>$(MSBuildProjectDirectory)\package\$(ThunderstorePackageName).zip</ThunderstoreZipPath>
+    <ConditionalConfigSyncOutputDir>$(MSBuildProjectDirectory)\..\ConditionalConfigSync\bin\$(Configuration)\$(TargetFramework)\</ConditionalConfigSyncOutputDir>
+    <BuildThunderstorePackageOnBuild Condition="'$(BuildThunderstorePackageOnBuild)' == ''">true</BuildThunderstorePackageOnBuild>
+    <GitHubReleaseDir>$(MSBuildProjectDirectory)\package\github\</GitHubReleaseDir>
+    <ReleaseChecksumsPath>$(GitHubReleaseDir)SHA256SUMS.txt</ReleaseChecksumsPath>
+  </PropertyGroup>
+
+  <Target
+    Name="BuildConditionalConfigSyncThunderstorePackage"
+    AfterTargets="Build"
+    Condition="'$(DesignTimeBuild)' != 'true' and '$(BuildThunderstorePackageOnBuild)' == 'true'">
+
+    <Error Condition="!Exists('$(TargetPath)')" Text="Plugin assembly was not found: $(TargetPath)" />
+    <Error Condition="!Exists('$(ConditionalConfigSyncOutputDir)ConditionalConfigSync.dll')" Text="Core assembly was not found: $(ConditionalConfigSyncOutputDir)ConditionalConfigSync.dll" />
+    <Error Condition="!Exists('$(ConditionalConfigSyncOutputDir)ConditionalConfigSync.xml')" Text="Core XML documentation was not found: $(ConditionalConfigSyncOutputDir)ConditionalConfigSync.xml" />
+    <Error Condition="!Exists('$(ThunderstorePackageDir)manifest.json')" Text="Thunderstore manifest was not found: $(ThunderstorePackageDir)manifest.json" />
+    <Error Condition="!Exists('$(ThunderstorePackageDir)icon.png')" Text="Thunderstore icon was not found: $(ThunderstorePackageDir)icon.png" />
+    <Error Condition="!Exists('$(ThunderstorePackageDir)README.md')" Text="Publication README was not found: $(ThunderstorePackageDir)README.md" />
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)\UpdateThunderstoreManifest.ps1')" Text="UpdateThunderstoreManifest.ps1 was not found." />
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)\GenerateChecksums.ps1')" Text="GenerateChecksums.ps1 was not found." />
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)\..\..\API\CommonPublish.ps1')" Text="CommonPublish.ps1 was not found: $(MSBuildProjectDirectory)\..\..\API\CommonPublish.ps1" />
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)\..\CHANGELOG.md')" Text="Root changelog was not found: $(MSBuildProjectDirectory)\..\CHANGELOG.md" />
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)\..\LICENSE')" Text="Root license was not found: $(MSBuildProjectDirectory)\..\LICENSE" />
+    <Error Condition="!Exists('$(MSBuildProjectDirectory)\..\THIRD_PARTY_NOTICES.md')" Text="Third-party notices were not found: $(MSBuildProjectDirectory)\..\THIRD_PARTY_NOTICES.md" />
+
+    <GetAssemblyIdentity AssemblyFiles="$(TargetPath)">
+      <Output TaskParameter="Assemblies" ItemName="_ConditionalConfigSyncPluginIdentity" />
+    </GetAssemblyIdentity>
+
+    <PropertyGroup>
+      <PackageVersion>%(_ConditionalConfigSyncPluginIdentity.Version)</PackageVersion>
+    </PropertyGroup>
+
+    <Error Condition="'$(PackageVersion)' == ''" Text="Package version was not resolved from $(TargetPath)." />
+
+    <MakeDir Directories="$(ThunderstorePackageDir);$(GitHubReleaseDir)" />
+
+    <Copy
+      SourceFiles="$(ThunderstorePackageDir)README.md"
+      DestinationFiles="$(MSBuildProjectDirectory)\..\README.md"
+      SkipUnchangedFiles="true" />
+
+    <ItemGroup>
+      <_StaleThunderstoreArtifacts Include="$(ThunderstorePackageDir)*.pdb" />
+      <_StaleThunderstoreArtifacts Include="$(ThunderstorePackageDir)*.mdb" />
+      <_StaleThunderstoreArtifacts Include="$(ThunderstorePackageDir)ConditionalConfigSync.Plugin.xml" />
+    </ItemGroup>
+    <Delete Files="@(_StaleThunderstoreArtifacts)" />
+
+    <ItemGroup>
+      <_ThunderstoreFiles Include="$(TargetPath)">
+        <TargetPath>$(ThunderstorePackageDir)ConditionalConfigSync.Plugin.dll</TargetPath>
+      </_ThunderstoreFiles>
+      <_ThunderstoreFiles Include="$(ConditionalConfigSyncOutputDir)ConditionalConfigSync.dll">
+        <TargetPath>$(ThunderstorePackageDir)ConditionalConfigSync.dll</TargetPath>
+      </_ThunderstoreFiles>
+      <_ThunderstoreFiles Include="$(ConditionalConfigSyncOutputDir)ConditionalConfigSync.xml">
+        <TargetPath>$(ThunderstorePackageDir)ConditionalConfigSync.xml</TargetPath>
+      </_ThunderstoreFiles>
+      <_ThunderstoreFiles Include="$(MSBuildProjectDirectory)\..\CHANGELOG.md">
+        <TargetPath>$(ThunderstorePackageDir)CHANGELOG.md</TargetPath>
+      </_ThunderstoreFiles>
+    </ItemGroup>
+
+    <Copy
+      SourceFiles="@(_ThunderstoreFiles)"
+      DestinationFiles="@(_ThunderstoreFiles->'%(TargetPath)')"
+      SkipUnchangedFiles="true" />
+
+    <ItemGroup>
+      <_GitHubReleaseFiles Include="$(TargetPath)">
+        <TargetPath>$(GitHubReleaseDir)ConditionalConfigSync.Plugin.dll</TargetPath>
+      </_GitHubReleaseFiles>
+      <_GitHubReleaseFiles Include="$(ConditionalConfigSyncOutputDir)ConditionalConfigSync.dll">
+        <TargetPath>$(GitHubReleaseDir)ConditionalConfigSync.dll</TargetPath>
+      </_GitHubReleaseFiles>
+      <_GitHubReleaseFiles Include="$(ConditionalConfigSyncOutputDir)ConditionalConfigSync.xml">
+        <TargetPath>$(GitHubReleaseDir)ConditionalConfigSync.xml</TargetPath>
+      </_GitHubReleaseFiles>
+      <_GitHubReleaseFiles Include="$(ThunderstorePackageDir)README.md">
+        <TargetPath>$(GitHubReleaseDir)README.md</TargetPath>
+      </_GitHubReleaseFiles>
+      <_GitHubReleaseFiles Include="$(MSBuildProjectDirectory)\..\CHANGELOG.md">
+        <TargetPath>$(GitHubReleaseDir)CHANGELOG.md</TargetPath>
+      </_GitHubReleaseFiles>
+      <_GitHubReleaseFiles Include="$(MSBuildProjectDirectory)\..\LICENSE">
+        <TargetPath>$(GitHubReleaseDir)LICENSE</TargetPath>
+      </_GitHubReleaseFiles>
+      <_GitHubReleaseFiles Include="$(MSBuildProjectDirectory)\..\THIRD_PARTY_NOTICES.md">
+        <TargetPath>$(GitHubReleaseDir)THIRD_PARTY_NOTICES.md</TargetPath>
+      </_GitHubReleaseFiles>
+    </ItemGroup>
+
+    <Copy
+      SourceFiles="@(_GitHubReleaseFiles)"
+      DestinationFiles="@(_GitHubReleaseFiles->'%(TargetPath)')"
+      SkipUnchangedFiles="true" />
+
+    <Exec
+      Command="powershell -ExecutionPolicy Bypass -NoProfile -File &quot;$(MSBuildProjectDirectory)\GenerateChecksums.ps1&quot; -PluginPath &quot;$(GitHubReleaseDir)ConditionalConfigSync.Plugin.dll&quot; -CorePath &quot;$(GitHubReleaseDir)ConditionalConfigSync.dll&quot; -OutputPath &quot;$(ReleaseChecksumsPath)&quot;" />
+
+    <Copy
+      SourceFiles="$(ReleaseChecksumsPath)"
+      DestinationFiles="$(ThunderstorePackageDir)SHA256SUMS.txt"
+      SkipUnchangedFiles="true" />
+
+    <Exec
+      Command="powershell -ExecutionPolicy Bypass -NoProfile -File &quot;$(MSBuildProjectDirectory)\UpdateThunderstoreManifest.ps1&quot; -ManifestPath &quot;$(ThunderstorePackageDir)manifest.json&quot; -Version &quot;$(PackageVersion)&quot;" />
+
+    <ZipDirectory
+      SourceDirectory="$(ThunderstorePackageDir)"
+      DestinationFile="$(ThunderstoreZipPath)"
+      Overwrite="true" />
+
+    <Message Text="Repository README updated from publication README: $(MSBuildProjectDirectory)\..\README.md" Importance="High" />
+    <Message Text="Detected package version from plugin DLL: $(PackageVersion)" Importance="High" />
+    <Message Text="Thunderstore package updated: $(ThunderstorePackageDir)" Importance="High" />
+    <Message Text="Thunderstore archive created: $(ThunderstoreZipPath)" Importance="High" />
+    <Message Text="GitHub release files updated: $(GitHubReleaseDir)" Importance="High" />
+    <Message Text="Release checksums created: $(ReleaseChecksumsPath)" Importance="High" />
+  </Target>
+
+
+  <Target Name="CopyDLLPlugins" AfterTargets="BuildConditionalConfigSyncThunderstorePackage">
+    <PropertyGroup>
+      <R2ModManPluginDirectory>D:\r2modman\Valheim\profiles\beta\BepInEx\plugins\shudnal-$(SolutionName)\</R2ModManPluginDirectory>
+      <ConditionalConfigSyncLibraryPath>$(TargetDir)ConditionalConfigSync.dll</ConditionalConfigSyncLibraryPath>
+    </PropertyGroup>
+
+    <Error Condition="!Exists('$(TargetPath)')" Text="Plugin DLL was not found: $(TargetPath)" />
+    <Error Condition="!Exists('$(ConditionalConfigSyncLibraryPath)')" Text="ConditionalConfigSync library DLL was not found: $(ConditionalConfigSyncLibraryPath)" />
+
+    <MakeDir Directories="$(R2ModManPluginDirectory)" />
+
+    <ItemGroup>
+      <_R2ModManPluginFiles Include="$(TargetPath)" />
+      <_R2ModManPluginFiles Include="$(ConditionalConfigSyncLibraryPath)" />
+    </ItemGroup>
+
+    <Copy
+      SourceFiles="@(_R2ModManPluginFiles)"
+      DestinationFolder="$(R2ModManPluginDirectory)"
+      SkipUnchangedFiles="true" />
+
+    <Message Text="Copied ConditionalConfigSync.Plugin.dll and ConditionalConfigSync.dll to plugins folder: $(R2ModManPluginDirectory)" Importance="High" />
+  </Target>
+
+</Project>

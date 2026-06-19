@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>ConditionalConfigSync</AssemblyName>
+    <RootNamespace>ConditionalConfigSync</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="0Harmony">
+      <HintPath>$(GameAssembliesPath)\Harmony\0Harmony.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="assembly_utils">
+      <HintPath>$(GameAssembliesPath)\stable\publicized_assemblies\assembly_utils.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="assembly_valheim">
+      <HintPath>$(GameAssembliesPath)\stable\publicized_assemblies\assembly_valheim.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="BepInEx">
+      <HintPath>$(GameAssembliesPath)\Harmony\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(GameAssembliesPath)\stable\Unity.TextMeshPro.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(GameAssembliesPath)\stable\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameAssembliesPath)\stable\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(GameAssembliesPath)\stable\UnityEngine.UI.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+  <Target Name="CopyConditionalConfigSyncReference" AfterTargets="Build">
+    <MakeDir Directories="$(ManagersAssembliesPath)" />
+    <ItemGroup>
+      <ConditionalConfigSyncReferenceFiles Include="$(TargetPath)" />
+      <ConditionalConfigSyncReferenceFiles Include="$(TargetDir)$(TargetName).xml" Condition="Exists('$(TargetDir)$(TargetName).xml')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ConditionalConfigSyncReferenceFiles)"
+          DestinationFolder="$(ManagersAssembliesPath)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

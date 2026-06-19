@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>ConditionalConfigSync.Plugin</AssemblyName>
+    <RootNamespace>ConditionalConfigSync</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ConditionalConfigSync\ConditionalConfigSync.csproj" />
+    <Reference Include="BepInEx">
+      <HintPath>$(GameAssembliesPath)\Harmony\BepInEx.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>$(GameAssembliesPath)\stable\UnityEngine.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(GameAssembliesPath)\stable\UnityEngine.CoreModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <Target Name="CopyConditionalConfigSyncArtifactsToPluginOutput" AfterTargets="Build">
+    <PropertyGroup>
+      <ConditionalConfigSyncOutputDir>$(MSBuildProjectDirectory)\..\ConditionalConfigSync\bin\$(Configuration)\$(TargetFramework)\</ConditionalConfigSyncOutputDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <ConditionalConfigSyncArtifacts Include="$(ConditionalConfigSyncOutputDir)ConditionalConfigSync.dll" Condition="Exists('$(ConditionalConfigSyncOutputDir)ConditionalConfigSync.dll')" />
+      <ConditionalConfigSyncArtifacts Include="$(ConditionalConfigSyncOutputDir)ConditionalConfigSync.xml" Condition="Exists('$(ConditionalConfigSyncOutputDir)ConditionalConfigSync.xml')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ConditionalConfigSyncArtifacts)"
+          DestinationFolder="$(TargetDir)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+  <Import Project="Thunderstore.targets" />
+</Project>
