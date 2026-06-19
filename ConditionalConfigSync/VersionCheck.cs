@@ -1,13 +1,11 @@
+using HarmonyLib;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Reflection;
-using HarmonyLib;
-using TMPro;
 using UnityEngine;
-using UnityEngine.UI;
 
 namespace ConditionalConfigSync;
 
