@@ -1,3 +1,6 @@
+# 1.0.1
+* renamed PluginInfo class to resolve conflict with BepInEx class with similar name
+
 # 1.0.0
 
 Initial release of Conditional Config Sync, a standalone shared dependency for Valheim mods.

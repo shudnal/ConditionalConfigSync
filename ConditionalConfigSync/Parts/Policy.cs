@@ -871,7 +871,7 @@ public partial class ConditionalConfigSync
         }
 
         AddConsoleLine(args,
-            $"ConditionalConfigSync policy status: protocol={PluginInfo.ProtocolVersion}, " +
+            $"ConditionalConfigSync policy status: protocol={PluginSelfInfo.ProtocolVersion}, " +
             $"mods={configSyncs.Count}, syncRules={currentSync.Count}, hiddenRules={currentHidden.Count}, " +
             $"syncFile='{SyncPolicyPath}', hiddenFile='{HiddenConfigsPath}'");
 

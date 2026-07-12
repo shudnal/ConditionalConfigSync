@@ -52,7 +52,7 @@ public partial class ConditionalConfigSync
         try
         {
             ZPackage request = GameReflection.NewPackage();
-            GameReflection.PackageWrite(request, PluginInfo.ProtocolVersion);
+            GameReflection.PackageWrite(request, PluginSelfInfo.ProtocolVersion);
             GameReflection.InvokeRoutedPackage(Name + ResyncRpcSuffix, request);
             DebugLog(ConditionalConfigSyncDebugLevel.Basic, "Resync", "Requested a complete synchronization package from the server");
             return true;
@@ -148,7 +148,7 @@ public partial class ConditionalConfigSync
                 RejectSync(
                     $"Rejected resync request from {FormatClient(sender)} using ConditionalConfigSync protocol " +
                     $"{(requesterProtocol == 0 ? "missing" : requesterProtocol.ToString())}. " +
-                    $"Required protocol is {PluginInfo.ProtocolVersion}.",
+                    $"Required protocol is {PluginSelfInfo.ProtocolVersion}.",
                     sender,
                     incoming: true);
                 return;
@@ -270,7 +270,7 @@ public partial class ConditionalConfigSync
 
     private static bool IsProtocolCompatible(int remoteProtocol)
     {
-        return remoteProtocol == PluginInfo.ProtocolVersion;
+        return remoteProtocol == PluginSelfInfo.ProtocolVersion;
     }
 
     private static string[] ReadAllLinesStable(string path, bool missingIsEmpty = false)

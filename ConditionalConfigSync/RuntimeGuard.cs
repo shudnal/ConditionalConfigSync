@@ -6,7 +6,7 @@ namespace ConditionalConfigSync;
 internal static class RuntimeGuard
 {
     internal const string StandaloneAssemblyName = "ConditionalConfigSync";
-    internal const string PluginGuid = PluginInfo.PluginGuid;
+    internal const string PluginGuid = PluginSelfInfo.PluginGuid;
     internal const string HarmonyId = PluginGuid;
 
     internal static bool IsStandaloneAssembly => string.Equals(

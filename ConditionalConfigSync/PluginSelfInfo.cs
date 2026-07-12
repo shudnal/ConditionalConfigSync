@@ -7,7 +7,7 @@ namespace ConditionalConfigSync;
 /// Change <see cref="PluginVersion"/> here when preparing a new release.
 /// </summary>
 [Description("Shared Conditional Config Sync package metadata. PluginVersion is the single release version source.")]
-public static class PluginInfo
+public static class PluginSelfInfo
 {
     /// <summary>BepInEx plugin identifier and Harmony owner ID.</summary>
     public const string PluginGuid = "_shudnal.ConditionalConfigSync";
@@ -22,7 +22,7 @@ public static class PluginInfo
     /// Package and assembly version. Update this single value for a new release.
     /// The Thunderstore manifest reads the compiled plugin assembly version during packaging.
     /// </summary>
-    public const string PluginVersion = "1.0.0";
+    public const string PluginVersion = "1.0.1";
 
     /// <summary>
     /// Current ConditionalConfigSync wire protocol version.
