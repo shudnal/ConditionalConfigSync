@@ -65,7 +65,7 @@ When the lock is enabled:
 - server administrators receive an exemption and may edit them;
 - client-controlled settings remain local and editable.
 
-When the lock is disabled, ordinary clients may publish changes to server-controlled settings if the mod author enabled unlocked-client updates.
+When the lock is disabled, ordinary clients may publish changes to server-controlled settings only if the mod author explicitly enabled unlocked-client updates. This option is disabled by default; administrators remain authorized regardless of the option.
 
 The locking setting is always protected:
 
@@ -74,6 +74,8 @@ The locking setting is always protected:
 - a non-admin client cannot change it even while the rest of the configuration is unlocked.
 
 This prevents a client from attempting to grant itself permission by changing the lock setting first.
+
+Client-side read-only metadata is only a user-interface aid. CCS also guards registered BepInEx values at runtime and independently validates every client update on the server. Accepted client values are applied and normalized by the server, then redistributed in a new server-built package. The original client package is never forwarded to other clients. Rejected updates receive an authoritative correction when the sender is still connected.
 
 ### Sync policy
 
@@ -112,7 +114,7 @@ Rules:
 - malformed, duplicate, conflicting, unknown, and ignored entries can be reported by `conditionalconfigsync_policy_validate`;
 - forcing the protected locking setting to client-controlled is ignored.
 
-Policy is edited only through these files. Console commands intentionally provide reload, validation, status, and dump operations but do not add, remove, or rewrite rules. File editing keeps the complete policy visible, reviewable, and easy to revert.
+Policy is normally edited through these files. Compatible configuration UIs may use the public API to let an authenticated server administrator switch an individual `Conditional` setting between server-controlled and client-controlled ownership. The server persists that action as an exact-setting rule, or removes the exact rule when the requested ownership is already provided by the mod default or a section rule. Console commands intentionally provide reload, validation, status, and dump operations but do not add, remove, or rewrite rules.
 
 Typical uses:
 
@@ -309,11 +311,28 @@ Use `CustomSyncedValue<T>` for state. Equal assignments are suppressed by its co
 
 The XML file shipped beside the DLL documents the public API, assignment modes, comparers, priorities, version checks, and integration details directly in IDE IntelliSense.
 
+### Effective configuration state
+
+Every registered config wrapper exposes read-only metadata for configuration UIs and diagnostics:
+
+- `ServerControlledByDefault` returns the normalized ownership selected by the mod;
+- `IsServerControlled` returns the current effective ownership, or the normalized mod default before policy state is initialized;
+- `IsPolicyStateInitialized` reports whether policy state is available for the current server session;
+- `IsSynchronizationOverridden` reports only policy changes that alter the mod-defined ownership;
+- `EffectiveOverride` identifies `ForceServerControlled` or `ForceClientControlled`;
+- `IsHidden` reports the effective hidden state;
+- `SynchronizationPolicyControlState` distinguishes an available policy control operation from a missing compatible server session, missing administrator access, or a fixed ownership mode;
+- `CanChangeSynchronizationPolicy` is a convenience boolean that is true only when `SynchronizationPolicyControlState` is `Available`;
+- `ToggleSynchronizationPolicy()` requests the opposite effective ownership and persists the resulting exact-setting rule on the server.
+
+A policy rule that matches the mod default is intentionally reported as `ConfigSyncOverride.None`, because it does not change runtime behavior. These properties are local read-only views of state already carried by the existing protocol and do not add a new network format.
+
 ### Protocol compatibility
 
 Conditional Config Sync uses a numeric wire protocol version that is independent from the DLL and package version.
 
 The first public release uses protocol `1`. Clients and servers must use the same protocol version. The protocol number is increased only when an incompatible network-format change is introduced; ordinary library updates do not require a protocol bump while the wire contract remains compatible.
+Policy-control support is advertised through an optional trailing capability field in the existing lock-exemption entry. Older clients ignore the extra payload, while newer clients keep interactive policy controls disabled when connected to a server that does not advertise the feature.
 
 ### Late registration and resynchronization
 
@@ -344,10 +363,11 @@ Subscriber exceptions are isolated and logged, so one consumer cannot interrupt 
 Compared with embedding a sync source file or ILRepacking a private DLL:
 
 - all dependent mods use one maintained implementation;
-- fixes to networking, policy, serialization, or security require updating only this package;
+- fixes to networking, policy, serialization, authorization, or configuration-manager integration require updating only this package;
 - duplicate Harmony patches, watchers, commands, and static registries are avoided;
 - server administrators get one common policy layer for all participating mods;
-- dependent mod packages remain smaller and simpler.
+- dependent mod packages remain smaller and simpler;
+- compatible 1.x releases keep the core assembly identity stable so already compiled dependent mods do not require rebuilding merely to receive runtime fixes.
 
 For Thunderstore, add this package to the mod's dependencies. Do not copy either Conditional Config Sync DLL into the dependent mod's own package.
 
@@ -366,6 +386,7 @@ For Thunderstore, add this package to the mod's dependencies. Do not copy either
 - Supports runtime switching between server-controlled and client-controlled state.
 - Adds three explicit config modes: `AlwaysServerControlled`, `Conditional`, and `AlwaysClientControlled`.
 - Adds server-side `SyncPolicy.cfg` overrides for exact settings and complete sections.
+- Allows compatible configuration UIs to request administrator-authorized exact-setting policy toggles while keeping the policy file as the persistent source of truth.
 - Adds exact-setting and section-level `HiddenConfigs.cfg` rules for Configuration Manager visibility.
 - Sends effective config state together with server values.
 
@@ -374,7 +395,10 @@ For Thunderstore, add this package to the mod's dependencies. Do not copy either
 - Keeps the lock and administrator exemption model familiar from ServerSync.
 - Protects the locking setting itself even while the configuration is unlocked.
 - Rejects non-admin network attempts to change the protected lock.
+- Treats unlocked non-admin publication as an explicit mod opt-in and disables it by default.
+- Re-evaluates write permission independently on the client runtime and on the server.
 - Uses the connected peer identity for current Valheim admin checks and clearer logs.
+- Validates an entire client update before applying values and redistributes only server-canonical state.
 
 ### Custom synchronized values
 
@@ -388,7 +412,9 @@ For Thunderstore, add this package to the mod's dependencies. Do not copy either
 
 - Regular `ConfigEntry` values use BepInEx TOML conversion based on the local setting type.
 - Custom values retain typed Valheim package serialization and support `ISerializableParameter`.
-- Uses length-prefixed entries so unknown package entries can be skipped safely.
+- Uses length-prefixed entries so unknown server entries can be isolated and client updates can be validated strictly.
+- Keeps legacy client `ConfigState` claims wire-compatible only when they match server policy, while never trusting or forwarding them.
+- Builds a new canonical server package after accepted client updates and includes the initiating client in the result.
 - Adds compression, fragmentation, queue limits, payload limits, and clearer failure logging.
 - Adds an independent numeric protocol version with exact client/server matching.
 - Supports automatic late registration and explicit complete resynchronization.
@@ -400,6 +426,7 @@ For Thunderstore, add this package to the mod's dependencies. Do not copy either
 - Adds per-mod receive logs with config/custom-value names for single-value updates.
 - Includes optional filtered debug logging and server policy status/reload/validate/dump commands.
 - Ships XML IntelliSense documentation and metadata descriptions for important public API members.
+- Keeps architecture, compatibility rules, rejected alternatives, regression risks, and release requirements in `PROJECT_CONTEXT.md`.
 
 ## Migration note
 
@@ -418,6 +445,7 @@ Conditional Config Sync:
 - does not download, update, or execute external programs;
 - does not access the Windows registry or ship native libraries;
 - communicates only through Valheim RPC connections between the current server and its connected clients;
+- treats client configuration packages as untrusted input, validates permissions on the server, and never forwards the original client package;
 - writes only its policy, debug, dump, and diagnostic files under `BepInEx/config/shudnal.ConditionalConfigSync`;
 - uses reflection only to access Valheim runtime members whose accessibility differs from publicized development assemblies;
 - publishes unobfuscated binaries, XML API documentation, source code, and SHA-256 hashes for both DLL files.

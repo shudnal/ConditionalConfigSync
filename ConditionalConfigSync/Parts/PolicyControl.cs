@@ -1,10 +1,9 @@
+using BepInEx.Configuration;
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Text;
-using BepInEx.Configuration;
 
 namespace ConditionalConfigSync;
 
@@ -17,29 +16,45 @@ public partial class ConditionalConfigSync
 
     private bool remotePolicyChangeSupported;
 
-    internal static bool CanChangePolicyFor(OwnConfigEntryBase config)
+    internal static ConfigSyncPolicyControlState GetPolicyControlStateFor(OwnConfigEntryBase config)
     {
         if (config == null || config.SyncMode != ConfigSyncMode.Conditional)
         {
-            return false;
+            return ConfigSyncPolicyControlState.Fixed;
         }
 
         ConditionalConfigSync? owner = GetOwningConfigSync(config);
-        if (owner == null || config == owner.lockedConfig || !sessionActive || !GameReflection.HasZNet)
+        if (owner == null || config == owner.lockedConfig)
         {
-            return false;
+            return ConfigSyncPolicyControlState.Fixed;
+        }
+
+        if (!sessionActive || !GameReflection.HasZNet)
+        {
+            return ConfigSyncPolicyControlState.RequiresCompatibleServerSession;
         }
 
         if (owner.IsSourceOfTruth)
         {
-            return isServer;
+            return isServer
+                ? ConfigSyncPolicyControlState.Available
+                : ConfigSyncPolicyControlState.RequiresCompatibleServerSession;
         }
 
-        return owner.InitialSyncDone
-               && owner.remotePolicyChangeSupported
-               && owner.IsAdmin
-               && GameReflection.GetPeers().Any(GameReflection.IsPeerReady);
+        if (!owner.InitialSyncDone
+            || !owner.remotePolicyChangeSupported
+            || !GameReflection.GetPeers().Any(GameReflection.IsPeerReady))
+        {
+            return ConfigSyncPolicyControlState.RequiresCompatibleServerSession;
+        }
+
+        return owner.IsAdmin
+            ? ConfigSyncPolicyControlState.Available
+            : ConfigSyncPolicyControlState.RequiresAdministratorAccess;
     }
+
+    internal static bool CanChangePolicyFor(OwnConfigEntryBase config) =>
+        GetPolicyControlStateFor(config) == ConfigSyncPolicyControlState.Available;
 
     internal static bool TogglePolicyFor(OwnConfigEntryBase config)
     {

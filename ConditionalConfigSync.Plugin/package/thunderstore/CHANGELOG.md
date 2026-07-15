@@ -1,3 +1,28 @@
+# 1.0.2
+* exposed a structured policy-control availability state so configuration UIs can distinguish a missing compatible server session from missing administrator access
+* renamed the public package metadata type from `PluginSelfInfo` to `PluginInfoCCS`
+* added public read-only effective synchronization metadata for configuration UIs and diagnostics
+* exposed normalized default ownership, effective ownership, policy initialization, hidden state, and effective ownership overrides
+* effective ownership falls back to the normalized mod default until policy state is initialized
+* added an administrator-authorized API for toggling individual Conditional settings between server and client ownership
+* policy changes requested by compatible configuration UIs are persisted as minimal exact-setting rules in SyncPolicy.cfg
+* fixed-mode settings and unauthorized clients cannot use the policy toggle API
+* compatible servers advertise policy-control support through an optional extension of the existing lock-exemption entry
+* no network protocol changes
+* fixed stale configuration-manager permissions by failing closed during connection and re-evaluating read-only metadata after initial synchronization
+* added a high-priority runtime guard that restores protected BepInEx config values before an unauthorized change notification can be processed
+* removed local fallback presence from write authorization; effective ownership, initial sync, admin status, server lock, and explicit unlocked-update opt-in now determine writability
+* changed `AllowClientConfigUpdatesWhenUnlocked` to a secure disabled-by-default opt-in for non-admin clients
+* hardened server-side client update validation with ready-peer checks, per-entry ownership and permission checks, duplicate/unknown/trailing-data rejection, and all-or-nothing parsing before application
+* client updates no longer send authoritative config state; matching legacy state claims remain accepted only as non-authoritative compatibility validation
+* stopped forwarding original client packages and now redistribute canonical values and server-computed state to every client, including the initiator
+* added rate-limited authoritative correction or full resynchronization after rejected client updates
+* added explicit accepted/rejected client-update audit logs with sender and authorization state
+* ensured an already registered locking entry is upgraded to protected always-server-controlled state
+* stabilized the public core assembly identity at `1.0.0.0` for compatible 1.x releases while retaining current file and informational versions
+* renamed the policy reload summary tag from `[Policy]` to `[SyncPolicy]`
+* added comprehensive architecture, rationale, compatibility, security, test, and release context in `PROJECT_CONTEXT.md`
+
 # 1.0.1
 * renamed PluginInfo class to resolve conflict with BepInEx class with similar name
 

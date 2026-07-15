@@ -123,13 +123,23 @@ public abstract class OwnConfigEntryBase
             ? ConfigSyncOverride.ForceServerControlled
             : ConfigSyncOverride.ForceClientControlled;
 
+    /// <summary>Gets the current availability state for changing this setting's server policy.</summary>
+    /// <remarks>
+    /// The state distinguishes fixed settings, unavailable server sessions, missing administrator access, and an
+    /// available policy control operation.
+    /// </remarks>
+    [Description("Why the current process can or cannot change this setting's server policy.")]
+    public ConfigSyncPolicyControlState SynchronizationPolicyControlState =>
+        ConditionalConfigSync.GetPolicyControlStateFor(this);
+
     /// <summary>Gets whether the current process may change this Conditional setting's server policy.</summary>
     /// <remarks>
-    /// Policy changes require an active server session. On a connected client the local player must have server
-    /// administrator access. Fixed synchronization modes always return <see langword="false"/>.
+    /// This is a convenience projection of <see cref="SynchronizationPolicyControlState"/>. It returns
+    /// <see langword="true"/> only when the state is <see cref="ConfigSyncPolicyControlState.Available"/>.
     /// </remarks>
     [Description("Whether the current process may change this Conditional setting's server policy.")]
-    public bool CanChangeSynchronizationPolicy => ConditionalConfigSync.CanChangePolicyFor(this);
+    public bool CanChangeSynchronizationPolicy =>
+        SynchronizationPolicyControlState == ConfigSyncPolicyControlState.Available;
 
     /// <summary>Requests the opposite effective ownership policy for this Conditional setting.</summary>
     /// <returns><see langword="true"/> when the change was applied locally or dispatched to the server.</returns>
