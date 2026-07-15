@@ -379,7 +379,7 @@ public partial class ConditionalConfigSync
         List<PolicyStateChangedEventArgs> policyTransitions = new();
         foreach (OwnConfigEntryBase config in allConfigs)
         {
-            bool firstInitialization = !config.PolicyStateInitialized;
+            bool firstInitialization = !config.IsPolicyStateInitialized;
 
             // On the first pass compare against the fully configured mode/default established during registration.
             bool oldEffectiveServerControlled = firstInitialization ? GetDefaultServerControlled(config) : config.IsServerControlled;
@@ -392,7 +392,7 @@ public partial class ConditionalConfigSync
 
             config.IsServerControlled = newServerControlled;
             config.IsHidden = newHidden;
-            config.PolicyStateInitialized = true;
+            config.IsPolicyStateInitialized = true;
 
             bool storedStateChanged = oldStoredServerControlled != newServerControlled || oldStoredHidden != newHidden;
             bool effectivePolicyChanged = oldEffectiveServerControlled != newServerControlled || oldEffectiveHidden != newHidden;
@@ -871,7 +871,7 @@ public partial class ConditionalConfigSync
         }
 
         AddConsoleLine(args,
-            $"ConditionalConfigSync policy status: protocol={PluginSelfInfo.ProtocolVersion}, " +
+            $"ConditionalConfigSync policy status: protocol={PluginInfoCCS.ProtocolVersion}, " +
             $"mods={configSyncs.Count}, syncRules={currentSync.Count}, hiddenRules={currentHidden.Count}, " +
             $"syncFile='{SyncPolicyPath}', hiddenFile='{HiddenConfigsPath}'");
 
@@ -954,12 +954,7 @@ public partial class ConditionalConfigSync
 
     private static bool GetDefaultServerControlled(OwnConfigEntryBase config)
     {
-        return config.SyncMode switch
-        {
-            ConfigSyncMode.AlwaysServerControlled => true,
-            ConfigSyncMode.AlwaysClientControlled => false,
-            _ => config.SynchronizedConfig,
-        };
+        return config.ServerControlledByDefault;
     }
 
     private bool ComputeServerControlled(OwnConfigEntryBase config)

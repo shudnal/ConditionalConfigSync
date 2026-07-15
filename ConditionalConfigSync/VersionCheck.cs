@@ -171,7 +171,7 @@ public partial class VersionCheck
 
     private bool IsProtocolOk()
     {
-        return receivedProtocolVersion == PluginSelfInfo.ProtocolVersion;
+        return receivedProtocolVersion == PluginInfoCCS.ProtocolVersion;
     }
     private string ErrorClient()
     {
@@ -183,7 +183,7 @@ public partial class VersionCheck
         {
             string protocol = receivedProtocolVersion == 0 ? "missing" : receivedProtocolVersion.ToString();
             return $"{DisplayName} uses incompatible ConditionalConfigSync protocol {protocol}. " +
-                   $"This client requires protocol {PluginSelfInfo.ProtocolVersion}.";
+                   $"This client requires protocol {PluginInfoCCS.ProtocolVersion}.";
         }
         bool myVersionOk = new System.Version(CurrentVersion) >= new System.Version(ReceivedMinimumRequiredVersion);
         return myVersionOk ? $"{DisplayName} may not be higher than version {ReceivedCurrentVersion}. You have version {CurrentVersion}." : $"{DisplayName} needs to be at least version {ReceivedMinimumRequiredVersion}. You have version {CurrentVersion}.";
@@ -196,7 +196,7 @@ public partial class VersionCheck
         {
             string protocol = receivedProtocolVersion == 0 ? "missing" : receivedProtocolVersion.ToString();
             return $"Disconnect: The client ({client}) uses incompatible ConditionalConfigSync protocol {protocol}. " +
-                   $"The server requires protocol {PluginSelfInfo.ProtocolVersion}.";
+                   $"The server requires protocol {PluginInfoCCS.ProtocolVersion}.";
         }
         return $"Disconnect: The client ({client}) doesn't have the correct {DisplayName} version {MinimumRequiredVersion}";
     }
@@ -338,14 +338,14 @@ public partial class VersionCheck
                 "Version",
                 check.DisplayName,
                 $"Sending version {check.CurrentVersion}, minimum {check.MinimumRequiredVersion}, " +
-                $"ConditionalConfigSync protocol {PluginSelfInfo.ProtocolVersion} to " +
+                $"ConditionalConfigSync protocol {PluginInfoCCS.ProtocolVersion} to " +
                 $"{(GameReflection.IsServer(__instance) ? "client" : "server")}");
 
             ZPackage zpackage = GameReflection.NewPackage();
             GameReflection.PackageWrite(zpackage, check.Name);
             GameReflection.PackageWrite(zpackage, check.MinimumRequiredVersion);
             GameReflection.PackageWrite(zpackage, check.CurrentVersion);
-            GameReflection.PackageWrite(zpackage, PluginSelfInfo.ProtocolVersion);
+            GameReflection.PackageWrite(zpackage, PluginInfoCCS.ProtocolVersion);
             GameReflection.InvokeRpc(peerRpc, "ConditionalConfigSync VersionCheck", zpackage);
         }
     }

@@ -28,3 +28,23 @@ public enum ConfigSyncMode
     /// <summary>Each client always owns this setting. SyncPolicy entries are ignored.</summary>
     AlwaysClientControlled,
 }
+
+/// <summary>
+/// Describes an effective ownership override applied to a <see cref="ConfigSyncMode.Conditional"/> setting.
+/// </summary>
+/// <remarks>
+/// This value reports only overrides that change the mod-defined default ownership. A matching policy rule that keeps
+/// the same ownership is represented by <see cref="None"/> because it has no effect on runtime behavior.
+/// </remarks>
+[Description("Effective ownership override applied to a Conditional setting.")]
+public enum ConfigSyncOverride
+{
+    /// <summary>The effective ownership matches the mod-defined default.</summary>
+    None,
+
+    /// <summary>The setting is server-controlled despite being client-controlled by default.</summary>
+    ForceServerControlled,
+
+    /// <summary>The setting is client-controlled despite being server-controlled by default.</summary>
+    ForceClientControlled,
+}

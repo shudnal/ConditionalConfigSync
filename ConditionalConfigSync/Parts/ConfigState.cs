@@ -34,6 +34,7 @@ public partial class ConditionalConfigSync
 
     private void ResetConfigsFromServer()
     {
+        remotePolicyChangeSupported = false;
         DebugLog(ConditionalConfigSyncDebugLevel.Verbose, "Reset", "Restoring local values after server sync/session end");
         Dictionary<ConfigFile, bool> saveOnConfigSet = new();
         List<PolicyStateChangedEventArgs> policyTransitions = new();
@@ -82,7 +83,7 @@ public partial class ConditionalConfigSync
             config.ClearServerValue();
             config.IsServerControlled = newServerControlled;
             config.IsHidden = false;
-            config.PolicyStateInitialized = false;
+            config.IsPolicyStateInitialized = false;
             if (oldServerControlled != newServerControlled || oldHidden)
             {
                 policyTransitions.Add(new PolicyStateChangedEventArgs(

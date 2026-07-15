@@ -52,7 +52,7 @@ public partial class ConditionalConfigSync
         try
         {
             ZPackage request = GameReflection.NewPackage();
-            GameReflection.PackageWrite(request, PluginSelfInfo.ProtocolVersion);
+            GameReflection.PackageWrite(request, PluginInfoCCS.ProtocolVersion);
             GameReflection.InvokeRoutedPackage(Name + ResyncRpcSuffix, request);
             DebugLog(ConditionalConfigSyncDebugLevel.Basic, "Resync", "Requested a complete synchronization package from the server");
             return true;
@@ -114,6 +114,7 @@ public partial class ConditionalConfigSync
 
         GameReflection.RegisterRoutedPackage(Name + " ConditionalConfigSync", RPC_FromOtherClientConfigSync);
         GameReflection.RegisterRoutedPackage(Name + ResyncRpcSuffix, RPC_RequestFullSync);
+        GameReflection.RegisterRoutedPackage(Name + PolicyChangeRpcSuffix, RPC_RequestSynchronizationPolicyChange);
         serverRpcsRegistered = true;
         DebugLog(ConditionalConfigSyncDebugLevel.Basic, "Register", $"Registered server RPCs for '{Name}'");
     }
@@ -148,7 +149,7 @@ public partial class ConditionalConfigSync
                 RejectSync(
                     $"Rejected resync request from {FormatClient(sender)} using ConditionalConfigSync protocol " +
                     $"{(requesterProtocol == 0 ? "missing" : requesterProtocol.ToString())}. " +
-                    $"Required protocol is {PluginSelfInfo.ProtocolVersion}.",
+                    $"Required protocol is {PluginInfoCCS.ProtocolVersion}.",
                     sender,
                     incoming: true);
                 return;
@@ -182,7 +183,7 @@ public partial class ConditionalConfigSync
             entries.Add(PackageEntry.ServerVersion(CurrentVersion));
         }
 
-        entries.Add(PackageEntry.LockExempt(IsPeerAdmin(peer)));
+        entries.Add(PackageEntry.LockExempt(IsPeerAdmin(peer), PolicyChangeCapability));
         return ConfigsToPackage(allConfigs.Select(c => c.BaseConfig), allCustomValues, entries, partial: false);
     }
 
@@ -270,7 +271,7 @@ public partial class ConditionalConfigSync
 
     private static bool IsProtocolCompatible(int remoteProtocol)
     {
-        return remoteProtocol == PluginSelfInfo.ProtocolVersion;
+        return remoteProtocol == PluginInfoCCS.ProtocolVersion;
     }
 
     private static string[] ReadAllLinesStable(string path, bool missingIsEmpty = false)

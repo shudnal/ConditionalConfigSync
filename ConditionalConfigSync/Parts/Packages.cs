@@ -100,7 +100,7 @@ public partial class ConditionalConfigSync
                     bool oldHidden = stateKv.Key.IsHidden;
                     stateKv.Key.IsServerControlled = stateKv.Value.ServerControlled;
                     stateKv.Key.IsHidden = stateKv.Value.Hidden;
-                    stateKv.Key.PolicyStateInitialized = true;
+                    stateKv.Key.IsPolicyStateInitialized = true;
                     if (oldServerControlled != stateKv.Value.ServerControlled || oldHidden != stateKv.Value.Hidden)
                     {
                         policyTransitions.Add(new PolicyStateChangedEventArgs(
@@ -194,6 +194,11 @@ public partial class ConditionalConfigSync
 
         if (receivedFromServer)
         {
+            if (configs.capabilities.HasValue)
+            {
+                remotePolicyChangeSupported = (configs.capabilities.Value & PolicyChangeCapability) != 0;
+            }
+
             // lockExempt is process-wide. Update Configuration Manager metadata and LockStateChanged
             // for every registered synchronization instance before policy subscribers are invoked.
             foreach (ConditionalConfigSync configSync in configSyncs)
@@ -214,6 +219,7 @@ public partial class ConditionalConfigSync
         public readonly Dictionary<OwnConfigEntryBase, object?> configValues = new();
         public readonly Dictionary<CustomSyncedValueBase, object?> customValues = new();
         public readonly Dictionary<OwnConfigEntryBase, ReceivedConfigState> configStates = new();
+        public int? capabilities;
     }
 
     private static string GetSingleEntryReceiveDetails(ParsedConfigs configs)
@@ -356,6 +362,10 @@ public partial class ConditionalConfigSync
                         if (receivedFromServer)
                         {
                             lockExempt = exempt;
+                            if (GameReflection.PackageSize(entry) - GameReflection.PackageGetPos(entry) >= sizeof(int))
+                            {
+                                configs.capabilities = GameReflection.PackageReadInt(entry);
+                            }
                         }
                         break;
                     }
@@ -377,9 +387,10 @@ public partial class ConditionalConfigSync
         public object? value;
         public bool serverControlled;
         public bool hidden;
+        public int? capabilities;
 
         public static PackageEntry ServerVersion(string version) => new() { kind = PackageEntryKind.ServerVersion, value = version };
-        public static PackageEntry LockExempt(bool value) => new() { kind = PackageEntryKind.LockExempt, value = value };
+        public static PackageEntry LockExempt(bool value, int? capabilities = null) => new() { kind = PackageEntryKind.LockExempt, value = value, capabilities = capabilities };
         public static PackageEntry ConfigState(ConfigEntryBase config, bool serverControlled, bool hidden) => new() { kind = PackageEntryKind.ConfigState, section = config.Definition.Section, key = config.Definition.Key, serverControlled = serverControlled, hidden = hidden };
     }
 
@@ -453,6 +464,10 @@ public partial class ConditionalConfigSync
                 break;
             case PackageEntryKind.LockExempt:
                 GameReflection.PackageWrite(payload, entry.value is bool b && b);
+                if (entry.capabilities.HasValue)
+                {
+                    GameReflection.PackageWrite(payload, entry.capabilities.Value);
+                }
                 break;
             case PackageEntryKind.ConfigState:
                 GameReflection.PackageWrite(payload, entry.section!);

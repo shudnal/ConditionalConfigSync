@@ -27,9 +27,37 @@ public abstract class OwnConfigEntryBase
     // ConditionalConfigSync also keeps the last server value, even when the entry is client-controlled.
     internal object? ServerValue;
     internal bool HasServerValue;
-    internal bool IsServerControlled = true;
-    internal bool IsHidden;
-    internal bool PolicyStateInitialized;
+
+    /// <summary>
+    /// Gets whether this setting is currently controlled and synchronized by the server.
+    /// </summary>
+    /// <remarks>
+    /// For <see cref="ConfigSyncMode.Conditional"/> settings this value reflects the effective server policy after it
+    /// has been initialized. Before that point it returns the normalized mod-defined default, including compatibility
+    /// code that assigns <see cref="SynchronizedConfig"/> after registration.
+    /// </remarks>
+    [Description("Whether this setting is currently server-controlled after applying effective policy.")]
+    public bool IsServerControlled
+    {
+        get => IsPolicyStateInitialized ? isServerControlled : ServerControlledByDefault;
+        internal set => isServerControlled = value;
+    }
+
+    private bool isServerControlled = true;
+
+    /// <summary>Gets whether effective server policy currently hides this setting from compatible config UIs.</summary>
+    [Description("Whether effective server policy currently hides this setting from compatible config UIs.")]
+    public bool IsHidden { get; internal set; }
+
+    /// <summary>
+    /// Gets whether the effective policy state has been initialized for the current server session.
+    /// </summary>
+    /// <remarks>
+    /// This is normally true on a running server after policy loading and on a connected client after receiving config
+    /// state from the server. It returns to false when the server connection is reset and local defaults are restored.
+    /// </remarks>
+    [Description("Whether effective policy state has been initialized for the current server session.")]
+    public bool IsPolicyStateInitialized { get; internal set; }
 
     /// <summary>
     /// Gets the underlying BepInEx config entry.
@@ -56,6 +84,56 @@ public abstract class OwnConfigEntryBase
     /// </remarks>
     [Description("Default ownership for Conditional mode: true for server-controlled, false for client-controlled.")]
     public bool SynchronizedConfig = true;
+
+    /// <summary>
+    /// Gets the normalized ownership defined by the mod before server policy is applied.
+    /// </summary>
+    /// <remarks>
+    /// Fixed modes always return their fixed ownership. Conditional mode returns <see cref="SynchronizedConfig"/>.
+    /// </remarks>
+    [Description("Normalized mod-defined ownership before server policy is applied.")]
+    public bool ServerControlledByDefault => SyncMode switch
+    {
+        ConfigSyncMode.AlwaysServerControlled => true,
+        ConfigSyncMode.AlwaysClientControlled => false,
+        _ => SynchronizedConfig,
+    };
+
+    /// <summary>
+    /// Gets whether effective policy changes the ownership defined by the mod.
+    /// </summary>
+    /// <remarks>
+    /// Only <see cref="ConfigSyncMode.Conditional"/> settings can be overridden. A policy rule that resolves to the same
+    /// ownership as the mod default is not reported as an override because it does not change runtime behavior.
+    /// </remarks>
+    [Description("Whether effective policy changes the mod-defined ownership.")]
+    public bool IsSynchronizationOverridden =>
+        SyncMode == ConfigSyncMode.Conditional && IsServerControlled != ServerControlledByDefault;
+
+    /// <summary>Gets the effective policy override that changes this setting's ownership.</summary>
+    [Description("Effective ownership override, or None when effective ownership matches the mod default.")]
+    public ConfigSyncOverride EffectiveOverride => !IsSynchronizationOverridden
+        ? ConfigSyncOverride.None
+        : IsServerControlled
+            ? ConfigSyncOverride.ForceServerControlled
+            : ConfigSyncOverride.ForceClientControlled;
+
+    /// <summary>Gets whether the current process may change this Conditional setting's server policy.</summary>
+    /// <remarks>
+    /// Policy changes require an active server session. On a connected client the local player must have server
+    /// administrator access. Fixed synchronization modes always return <see langword="false"/>.
+    /// </remarks>
+    [Description("Whether the current process may change this Conditional setting's server policy.")]
+    public bool CanChangeSynchronizationPolicy => ConditionalConfigSync.CanChangePolicyFor(this);
+
+    /// <summary>Requests the opposite effective ownership policy for this Conditional setting.</summary>
+    /// <returns><see langword="true"/> when the change was applied locally or dispatched to the server.</returns>
+    /// <remarks>
+    /// The server persists the resulting exact-setting rule in <c>ConditionalConfigSync.SyncPolicy.cfg</c>. When the
+    /// requested ownership is already provided by the mod default or a section rule, an unnecessary exact rule is removed.
+    /// </remarks>
+    [Description("Switches this Conditional setting between server-controlled and client-controlled policy.")]
+    public bool ToggleSynchronizationPolicy() => ConditionalConfigSync.TogglePolicyFor(this);
 
     internal void StoreLocalBaseValue(object? value)
     {

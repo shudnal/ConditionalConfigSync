@@ -334,7 +334,7 @@ public partial class ConditionalConfigSync
         bool applyLoadedPolicy = IsSourceOfTruth && isServer && GameReflection.HasZNet && policySupportInitialized;
         syncedEntry.IsServerControlled = applyLoadedPolicy ? ComputeServerControlled(syncedEntry) : GetDefaultServerControlled(syncedEntry);
         syncedEntry.IsHidden = applyLoadedPolicy && ComputeHidden(syncedEntry);
-        syncedEntry.PolicyStateInitialized = applyLoadedPolicy;
+        syncedEntry.IsPolicyStateInitialized = applyLoadedPolicy;
 
         ConfigurationManagerAttributes attributes = GetConfigAttribute<ConfigurationManagerAttributes>(configEntry);
         attributes.ReadOnly = !IsWritableConfig(syncedEntry);
@@ -460,7 +460,7 @@ public partial class ConditionalConfigSync
 
         lockedConfig = AddConfigEntry(lockingConfig, ConfigSyncMode.AlwaysServerControlled);
         lockedConfig.IsServerControlled = true;
-        lockedConfig.PolicyStateInitialized = false;
+        lockedConfig.IsPolicyStateInitialized = false;
         lockingConfig.SettingChanged += (_, _) => LockedConfigChanged?.Invoke();
         LockedConfigChanged -= ServerLockedSettingChanged;
         LockedConfigChanged += ServerLockedSettingChanged;

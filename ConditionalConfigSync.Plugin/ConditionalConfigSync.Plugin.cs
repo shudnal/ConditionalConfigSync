@@ -17,13 +17,13 @@ public sealed class ConditionalConfigSyncPlugin : BaseUnityPlugin
 {
     /// <summary>BepInEx dependency identifier used by dependent mods.</summary>
     [Description("BepInEx hard-dependency identifier used by mods that consume ConditionalConfigSync.")]
-    public const string PluginGuid = PluginSelfInfo.PluginGuid;
+    public const string PluginGuid = PluginInfoCCS.PluginGuid;
     /// <summary>Display name of the standalone BepInEx plugin.</summary>
     [Description("Display name of the standalone BepInEx plugin.")]
-    public const string PluginName = PluginSelfInfo.PluginName;
-    /// <summary>Current package version, sourced from <see cref="PluginSelfInfo.PluginVersion"/>.</summary>
+    public const string PluginName = PluginInfoCCS.PluginName;
+    /// <summary>Current package version, sourced from <see cref="PluginInfoCCS.PluginVersion"/>.</summary>
     [Description("Package version sourced from PluginInfo.PluginVersion.")]
-    public const string PluginVersion = PluginSelfInfo.PluginVersion;
+    public const string PluginVersion = PluginInfoCCS.PluginVersion;
 
     private const string PluginAssemblyName = "ConditionalConfigSync.Plugin";
     private const string CoreAssemblyName = "ConditionalConfigSync";
