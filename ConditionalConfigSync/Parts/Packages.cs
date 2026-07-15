@@ -49,6 +49,7 @@ public partial class ConditionalConfigSync
             try
             {
                 config.BaseConfig.BoxedValue = value;
+                config.StoreLastAcceptedValue(config.BaseConfig.BoxedValue);
                 return true;
             }
             catch (Exception e)
@@ -181,6 +182,7 @@ public partial class ConditionalConfigSync
             try
             {
                 configKv.Key.BoxedValue = configKv.Value;
+                configKv.Key.StoreLastAcceptedValue(configKv.Key.BoxedValue);
             }
             catch (Exception e)
             {
@@ -219,7 +221,15 @@ public partial class ConditionalConfigSync
         public readonly Dictionary<OwnConfigEntryBase, object?> configValues = new();
         public readonly Dictionary<CustomSyncedValueBase, object?> customValues = new();
         public readonly Dictionary<OwnConfigEntryBase, ReceivedConfigState> configStates = new();
+        public readonly Dictionary<OwnConfigEntryBase, ReceivedConfigState> clientConfigStateClaims = new();
         public int? capabilities;
+        public string? rejectionReason;
+        public int entryCount;
+
+        public void Reject(string reason)
+        {
+            rejectionReason ??= reason;
+        }
     }
 
     private static string GetSingleEntryReceiveDetails(ParsedConfigs configs)
@@ -249,13 +259,15 @@ public partial class ConditionalConfigSync
         ConfigState = 5,
     }
 
-    private ParsedConfigs ReadConfigsFromPackage(ZPackage package, bool receivedFromServer)
+    private ParsedConfigs ReadConfigsFromPackage(ZPackage package, bool receivedFromServer, bool strictClientUpdate = false)
     {
         ParsedConfigs configs = new();
         Dictionary<string, OwnConfigEntryBase> configMap = allConfigs.ToDictionary(c => c.BaseConfig.Definition.Section + "\n" + c.BaseConfig.Definition.Key, c => c);
         Dictionary<string, CustomSyncedValueBase> customValueMap = allCustomValues.ToDictionary(c => c.Identifier, c => c);
+        HashSet<string> seenEntries = new(StringComparer.Ordinal);
 
         int valueCount = GameReflection.PackageReadInt(package);
+        configs.entryCount = valueCount;
         if (valueCount < 0 || valueCount > maxPackageEntries)
         {
             throw new InvalidDataException($"Invalid config entry count {valueCount}");
@@ -267,7 +279,14 @@ public partial class ConditionalConfigSync
             byte[] payload = GameReflection.PackageReadByteArray(package, maxPayloadSize);
             if (payload.Length > maxPayloadSize)
             {
-                DebugWarning("Read", $"Skipping too large entry payload ({payload.Length})");
+                if (strictClientUpdate)
+                {
+                    configs.Reject($"entry {i + 1} exceeds the {maxPayloadSize}-byte entry limit");
+                }
+                else
+                {
+                    DebugWarning("Read", $"Skipping too large entry payload ({payload.Length})");
+                }
                 continue;
             }
 
@@ -280,6 +299,15 @@ public partial class ConditionalConfigSync
                         string section = GameReflection.PackageReadString(entry);
                         string key = GameReflection.PackageReadString(entry);
                         string serializedValue = GameReflection.PackageReadString(entry);
+                        string identifier = "config\n" + section + "\n" + key;
+                        if (!seenEntries.Add(identifier))
+                        {
+                            if (strictClientUpdate)
+                            {
+                                configs.Reject($"duplicate config entry {section} -> {key}");
+                            }
+                            break;
+                        }
 
                         if (configMap.TryGetValue(section + "\n" + key, out OwnConfigEntryBase config))
                         {
@@ -289,12 +317,28 @@ public partial class ConditionalConfigSync
                             }
                             catch (Exception e)
                             {
-                                DebugWarning("Read", $"Config value of setting \"{config.BaseConfig.Definition}\" could not be parsed and will be ignored. Reason: {e.Message}");
+                                if (strictClientUpdate)
+                                {
+                                    configs.Reject($"config {section} -> {key} could not be parsed: {e.Message}");
+                                }
+                                else
+                                {
+                                    DebugWarning("Read", $"Config value of setting \"{config.BaseConfig.Definition}\" could not be parsed and will be ignored. Reason: {e.Message}");
+                                }
                             }
+                        }
+                        else if (strictClientUpdate)
+                        {
+                            configs.Reject($"unknown config entry {section} -> {key}");
                         }
                         else
                         {
                             DebugWarning("Read", $"Received unknown config entry {section}/{key}. This may happen if client and server versions of the mod do not match.");
+                        }
+
+                        if (strictClientUpdate && GameReflection.PackageGetPos(entry) != GameReflection.PackageSize(entry))
+                        {
+                            configs.Reject($"config entry {section} -> {key} contains trailing data");
                         }
                         break;
                     }
@@ -305,13 +349,41 @@ public partial class ConditionalConfigSync
                         bool serverControlled = GameReflection.PackageReadBool(entry);
                         bool hidden = GameReflection.PackageReadBool(entry);
 
+                        string identifier = "state\n" + section + "\n" + key;
+                        if (!seenEntries.Add(identifier))
+                        {
+                            if (strictClientUpdate)
+                            {
+                                configs.Reject($"duplicate config state {section} -> {key}");
+                            }
+                            break;
+                        }
+
                         if (configMap.TryGetValue(section + "\n" + key, out OwnConfigEntryBase config))
                         {
-                            configs.configStates[config] = new ReceivedConfigState(serverControlled, hidden);
+                            if (strictClientUpdate)
+                            {
+                                // Legacy clients included ConfigState next to the changed value. Keep the wire format
+                                // compatible, but treat the claim only as validation input and never as authority.
+                                configs.clientConfigStateClaims[config] = new ReceivedConfigState(serverControlled, hidden);
+                            }
+                            else
+                            {
+                                configs.configStates[config] = new ReceivedConfigState(serverControlled, hidden);
+                            }
+                        }
+                        else if (strictClientUpdate)
+                        {
+                            configs.Reject($"unknown config state {section} -> {key}");
                         }
                         else
                         {
                             DebugWarning("Read", $"Received unknown config state {section}/{key}. This may happen if client and server versions of the mod do not match.");
+                        }
+
+                        if (strictClientUpdate && GameReflection.PackageGetPos(entry) != GameReflection.PackageSize(entry))
+                        {
+                            configs.Reject($"config state {section} -> {key} contains trailing data");
                         }
                         break;
                     }
@@ -319,38 +391,83 @@ public partial class ConditionalConfigSync
                     {
                         string identifier = GameReflection.PackageReadString(entry);
                         string typeName = GameReflection.PackageReadString(entry);
+                        string seenIdentifier = "custom\n" + identifier;
+                        if (!seenEntries.Add(seenIdentifier))
+                        {
+                            if (strictClientUpdate)
+                            {
+                                configs.Reject($"duplicate custom synced value {identifier}");
+                            }
+                            break;
+                        }
 
                         if (!customValueMap.TryGetValue(identifier, out CustomSyncedValueBase config))
                         {
-                            DebugWarning("Read", $"Received unknown custom synced value {identifier}. This may happen if client and server versions of the mod do not match.");
+                            if (strictClientUpdate)
+                            {
+                                configs.Reject($"unknown custom synced value {identifier}");
+                            }
+                            else
+                            {
+                                DebugWarning("Read", $"Received unknown custom synced value {identifier}. This may happen if client and server versions of the mod do not match.");
+                            }
                             break;
                         }
 
                         string expectedType = GetZPackageTypeString(config.Type);
                         if (typeName != expectedType)
                         {
-                            DebugWarning("Read", $"Got unexpected type {typeName} for custom synced value {identifier}, expecting {expectedType}");
+                            if (strictClientUpdate)
+                            {
+                                configs.Reject($"custom synced value {identifier} has type {typeName}, expected {expectedType}");
+                            }
+                            else
+                            {
+                                DebugWarning("Read", $"Got unexpected type {typeName} for custom synced value {identifier}, expecting {expectedType}");
+                            }
                             break;
                         }
 
                         try
                         {
                             configs.customValues[config] = ReadCustomValueFromPackage(entry, config.Type);
+                            if (strictClientUpdate && GameReflection.PackageGetPos(entry) != GameReflection.PackageSize(entry))
+                            {
+                                configs.Reject($"custom synced value {identifier} contains trailing data");
+                            }
                         }
                         catch (InvalidDeserializationTypeException e)
                         {
-                            DebugWarning("Read", $"Got unexpected struct internal type {e.received} for field {e.field} struct {typeName} for custom synced value {identifier}, expecting {e.expected}");
+                            if (strictClientUpdate)
+                            {
+                                configs.Reject($"custom synced value {identifier} has unexpected internal type {e.received} for {e.field}, expected {e.expected}");
+                            }
+                            else
+                            {
+                                DebugWarning("Read", $"Got unexpected struct internal type {e.received} for field {e.field} struct {typeName} for custom synced value {identifier}, expecting {e.expected}");
+                            }
                         }
                         catch (Exception e)
                         {
-                            DebugWarning("Read", $"Could not deserialize custom synced value {identifier}: {e}");
+                            if (strictClientUpdate)
+                            {
+                                configs.Reject($"custom synced value {identifier} could not be deserialized: {e.Message}");
+                            }
+                            else
+                            {
+                                DebugWarning("Read", $"Could not deserialize custom synced value {identifier}: {e}");
+                            }
                         }
                         break;
                     }
                 case PackageEntryKind.ServerVersion:
                     {
                         string serverVersion = GameReflection.PackageReadString(entry);
-                        if (receivedFromServer && serverVersion != CurrentVersion)
+                        if (strictClientUpdate)
+                        {
+                            configs.Reject("client update contains prohibited ServerVersion metadata");
+                        }
+                        else if (receivedFromServer && serverVersion != CurrentVersion)
                         {
                             DebugWarning("Version", $"Received server version is not equal: server version={serverVersion}, local version={CurrentVersion ?? "unknown"}");
                         }
@@ -359,6 +476,12 @@ public partial class ConditionalConfigSync
                 case PackageEntryKind.LockExempt:
                     {
                         bool exempt = GameReflection.PackageReadBool(entry);
+                        if (strictClientUpdate)
+                        {
+                            configs.Reject("client update contains prohibited LockExempt metadata");
+                            break;
+                        }
+
                         if (receivedFromServer)
                         {
                             lockExempt = exempt;
@@ -370,8 +493,40 @@ public partial class ConditionalConfigSync
                         break;
                     }
                 default:
-                    DebugWarning("Read", $"Received unknown config entry kind {(byte)kind}");
+                    if (strictClientUpdate)
+                    {
+                        configs.Reject($"client update contains unknown entry kind {(byte)kind}");
+                    }
+                    else
+                    {
+                        DebugWarning("Read", $"Received unknown config entry kind {(byte)kind}");
+                    }
                     break;
+            }
+        }
+
+        if (strictClientUpdate)
+        {
+            foreach (KeyValuePair<OwnConfigEntryBase, ReceivedConfigState> claim in configs.clientConfigStateClaims)
+            {
+                ConfigDefinition definition = claim.Key.BaseConfig.Definition;
+                if (!configs.configValues.ContainsKey(claim.Key))
+                {
+                    configs.Reject($"client update contains config state without a value for {definition.Section} -> {definition.Key}");
+                    continue;
+                }
+
+                bool expectedServerControlled = ComputeServerControlled(claim.Key);
+                bool expectedHidden = ComputeHidden(claim.Key);
+                if (claim.Value.ServerControlled != expectedServerControlled || claim.Value.Hidden != expectedHidden)
+                {
+                    configs.Reject($"client config state for {definition.Section} -> {definition.Key} does not match the server's effective policy");
+                }
+            }
+
+            if (GameReflection.PackageGetPos(package) != GameReflection.PackageSize(package))
+            {
+                configs.Reject("client update package contains trailing data");
             }
         }
 
@@ -400,7 +555,8 @@ public partial class ConditionalConfigSync
         IEnumerable<PackageEntry>? packageEntries = null,
         bool partial = true,
         bool includeConfigValues = true,
-        bool includeAllProvidedConfigStates = false)
+        bool includeAllProvidedConfigStates = false,
+        bool includeConfigStates = true)
     {
         List<OwnConfigEntryBase> configList = new();
         if (configs != null)
@@ -422,15 +578,19 @@ public partial class ConditionalConfigSync
 
         ZPackage package = GameReflection.NewPackage();
         GameReflection.PackageWrite(package, (byte)((partial ? PARTIAL_CONFIGS : 0) | V2_PACKAGE));
-        GameReflection.PackageWrite(package, valueConfigList.Count + configList.Count + customValueList.Count + packageEntryList.Count);
+        int configStateCount = includeConfigStates ? configList.Count : 0;
+        GameReflection.PackageWrite(package, valueConfigList.Count + configStateCount + customValueList.Count + packageEntryList.Count);
 
         foreach (PackageEntry packageEntry in packageEntryList)
         {
             AddEntryToPackage(package, packageEntry);
         }
-        foreach (OwnConfigEntryBase config in configList)
+        if (includeConfigStates)
         {
-            AddEntryToPackage(package, PackageEntry.ConfigState(config.BaseConfig, GetPackageServerControlled(config), GetPackageHidden(config)));
+            foreach (OwnConfigEntryBase config in configList)
+            {
+                AddEntryToPackage(package, PackageEntry.ConfigState(config.BaseConfig, GetPackageServerControlled(config), GetPackageHidden(config)));
+            }
         }
         foreach (CustomSyncedValueBase customValue in customValueList)
         {

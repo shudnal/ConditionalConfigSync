@@ -54,6 +54,9 @@ public abstract class CustomSyncedValueBase
     public object? LocalBaseValue;
     internal bool HasLocalBaseValue;
 
+    internal object? LastAcceptedValue;
+    internal bool HasLastAcceptedValue;
+
     /// <summary>
     /// Unique identifier of this custom value within its owning synchronization instance.
     /// </summary>
@@ -152,6 +155,12 @@ public abstract class CustomSyncedValueBase
         LocalBaseValue = null;
         HasLocalBaseValue = false;
     }
+
+    internal void StoreLastAcceptedValue(object? value)
+    {
+        LastAcceptedValue = value;
+        HasLastAcceptedValue = true;
+    }
 }
 
 /// <summary>
@@ -230,6 +239,7 @@ public class CustomSyncedValue<T> : CustomSyncedValueBase
     {
         this.valueComparer = valueComparer ?? EqualityComparer<T>.Default;
         Value = value;
+        StoreLastAcceptedValue(BoxedValue);
     }
 
     /// <summary>

@@ -12,7 +12,7 @@ using System.Runtime.CompilerServices;
 [assembly: AssemblyCulture("")]
 [assembly: ComVisible(false)]
 [assembly: Guid("566458c7-717b-4583-af37-a69e4cd02966")]
-[assembly: AssemblyVersion(ConditionalConfigSync.PluginInfoCCS.PluginVersion)]
+[assembly: AssemblyVersion("1.0.0.0")]
 [assembly: AssemblyFileVersion(ConditionalConfigSync.PluginInfoCCS.PluginVersion)]
 [assembly: AssemblyInformationalVersion(ConditionalConfigSync.PluginInfoCCS.PluginVersion)]
 [assembly: AssemblyMetadata("RepositoryUrl", "https://github.com/shudnal/ConditionalConfigSync")]

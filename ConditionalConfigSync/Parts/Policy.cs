@@ -269,7 +269,7 @@ public partial class ConditionalConfigSync
         {
             int forceServer = newSyncPolicy.Count(kv => kv.Value == ConfigPolicyOverride.ForceServerControlled);
             int forceClient = newSyncPolicy.Count(kv => kv.Value == ConfigPolicyOverride.ForceClientControlled);
-            LogSource.LogInfo($"[Policy] Reloaded: forceServer={forceServer}, forceClient={forceClient}, hidden={newHiddenPolicy.Count}, source={source}");
+            LogSource.LogInfo($"[SyncPolicy] Reloaded: forceServer={forceServer}, forceClient={forceClient}, hidden={newHiddenPolicy.Count}, source={source}");
         }
 
         RefreshPolicyStatesForAll(source, broadcast: !quiet);

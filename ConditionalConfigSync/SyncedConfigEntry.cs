@@ -28,6 +28,11 @@ public abstract class OwnConfigEntryBase
     internal object? ServerValue;
     internal bool HasServerValue;
 
+    // Last value accepted by the local permission model or applied from the authoritative server.
+    // It is used to undo changes made through stale or incompatible configuration UIs.
+    internal object? LastAcceptedValue;
+    internal bool HasLastAcceptedValue;
+
     /// <summary>
     /// Gets whether this setting is currently controlled and synchronized by the server.
     /// </summary>
@@ -158,6 +163,12 @@ public abstract class OwnConfigEntryBase
         ServerValue = null;
         HasServerValue = false;
     }
+
+    internal void StoreLastAcceptedValue(object? value)
+    {
+        LastAcceptedValue = value;
+        HasLastAcceptedValue = true;
+    }
 }
 
 /// <summary>
@@ -219,7 +230,7 @@ public class SyncedConfigEntry<T> : OwnConfigEntryBase
         }
         else
         {
-            LocalBaseValue = value;
+            StoreLocalBaseValue(value);
         }
     }
 }

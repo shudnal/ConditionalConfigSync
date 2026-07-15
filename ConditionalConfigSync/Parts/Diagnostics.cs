@@ -371,6 +371,7 @@ public partial class ConditionalConfigSync
         }
 
         InitialSyncDone = true;
+        ServerLockedSettingChanged();
         InvokeEventHandlers(InitialSyncCompleted, nameof(InitialSyncCompleted));
     }
 

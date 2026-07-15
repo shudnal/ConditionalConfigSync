@@ -83,25 +83,35 @@ public partial class ConditionalConfigSync
     public bool ModRequired { get; set; } = false;
 
     /// <summary>
-    /// Allows an unlocked client to send config and custom-value changes to the server, matching ServerSync unlocked-client behavior.
+    /// Allows an unlocked non-admin client to send config and custom-value changes to the server.
     /// </summary>
-    /// <remarks>Set to <see langword="false"/> for strictly server-originated synchronization even when the lock is disabled.</remarks>
-    [Description("Allows unlocked clients to publish changes, matching ServerSync unlocked-client behavior.")]
-    public bool AllowClientConfigUpdatesWhenUnlocked = true;
+    /// <remarks>
+    /// The default is <see langword="false"/> so server-controlled values remain server-originated unless a mod
+    /// explicitly opts into collaborative unlocked-client updates. Administrator clients are not affected by this option.
+    /// </remarks>
+    [Description("Allows unlocked non-admin clients to publish changes. Disabled by default.")]
+    public bool AllowClientConfigUpdatesWhenUnlocked = false;
 
     private bool? forceConfigLocking;
 
+    private bool ServerLockEnabled =>
+        forceConfigLocking
+        ?? lockedConfig != null
+        && ((IConvertible)lockedConfig.BaseConfig.BoxedValue).ToInt32(CultureInfo.InvariantCulture) != 0;
+
     /// <summary>
-    /// Gets whether non-admin clients are currently prevented from publishing server-controlled settings.
+    /// Gets the effective locking-setting state for the local process after applying the local admin exemption.
     /// </summary>
     /// <remarks>
     /// The getter combines the locking config entry, an optional programmatic override, and the local admin exemption.
-    /// Assigning this property sets a programmatic override for the current process.
+    /// Assigning this property sets a programmatic override for the current process. A value of <see langword="false"/>
+    /// does not by itself grant ordinary clients write access; <see cref="AllowClientConfigUpdatesWhenUnlocked"/> must also
+    /// be enabled by the mod.
     /// </remarks>
-    [Description("Whether non-admin clients are currently blocked from publishing server-controlled settings.")]
+    [Description("Effective local lock state. Unlocked non-admin writes still require explicit mod opt-in.")]
     public bool IsLocked
     {
-        get => (forceConfigLocking ?? lockedConfig != null && ((IConvertible)lockedConfig.BaseConfig.BoxedValue).ToInt32(CultureInfo.InvariantCulture) != 0) && !lockExempt;
+        get => ServerLockEnabled && !lockExempt;
         set
         {
             bool oldValue = IsLocked;
@@ -320,6 +330,7 @@ public partial class ConditionalConfigSync
             SyncMode = syncMode,
             SynchronizedConfig = normalizedDefault,
         };
+        syncedEntry.StoreLastAcceptedValue(configEntry.BoxedValue);
 
         AccessTools.DeclaredField(typeof(ConfigDescription), "<Tags>k__BackingField").SetValue(
             configEntry.Description,
@@ -459,8 +470,11 @@ public partial class ConditionalConfigSync
         }
 
         lockedConfig = AddConfigEntry(lockingConfig, ConfigSyncMode.AlwaysServerControlled);
+        lockedConfig.SyncMode = ConfigSyncMode.AlwaysServerControlled;
+        lockedConfig.SynchronizedConfig = true;
         lockedConfig.IsServerControlled = true;
-        lockedConfig.IsPolicyStateInitialized = false;
+        lockedConfig.IsPolicyStateInitialized = IsSourceOfTruth && isServer && GameReflection.HasZNet && policySupportInitialized;
+        lockedConfig.StoreLastAcceptedValue(lockingConfig.BoxedValue);
         lockingConfig.SettingChanged += (_, _) => LockedConfigChanged?.Invoke();
         LockedConfigChanged -= ServerLockedSettingChanged;
         LockedConfigChanged += ServerLockedSettingChanged;

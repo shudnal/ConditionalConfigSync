@@ -171,6 +171,15 @@ public partial class ConditionalConfigSync
             prefix: peerInfoPrefix,
             postfix: CreateHarmonyMethod(typeof(ZNetRpcPeerInfoSyncPatch), nameof(ZNetRpcPeerInfoSyncPatch.Postfix)));
 
+        HarmonyMethod settingChangedPrefix = CreateHarmonyMethod(
+            typeof(ConfigEntryOnSettingChangedPatch),
+            nameof(ConfigEntryOnSettingChangedPatch.Prefix));
+        settingChangedPrefix.priority = Priority.First;
+        harmony.Patch(
+            AccessTools.DeclaredMethod(typeof(ConfigEntryBase), "OnSettingChanged")
+            ?? throw new MissingMethodException(typeof(ConfigEntryBase).FullName, "OnSettingChanged"),
+            prefix: settingChangedPrefix);
+
         harmony.Patch(
             AccessTools.DeclaredMethod(typeof(ConfigEntryBase), nameof(ConfigEntryBase.GetSerializedValue), Type.EmptyTypes),
             prefix: CreateHarmonyMethod(typeof(ConfigEntryGetSerializedValuePatch), nameof(ConfigEntryGetSerializedValuePatch.Prefix)));

@@ -88,6 +88,8 @@ public partial class ConditionalConfigSync
         }
         else
         {
+            IsSourceOfTruth = false;
+            ServerLockedSettingChanged();
             bool connectedPeerFound = false;
             foreach (ZNetPeer peer in GameReflection.GetPeers())
             {
@@ -267,6 +269,7 @@ public partial class ConditionalConfigSync
         lateRegisteredConfigs.Clear();
         lateRegisteredCustomValues.Clear();
         lateRegistrationSyncScheduled = false;
+        authoritativeCorrectionTimes.Clear();
     }
 
     private static bool IsProtocolCompatible(int remoteProtocol)

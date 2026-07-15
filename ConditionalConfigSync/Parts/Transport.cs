@@ -35,20 +35,54 @@ public partial class ConditionalConfigSync
 
     private readonly HashSet<CustomSyncedValueBase> customValuesBeingApplied = new();
 
+    private readonly Dictionary<long, long> authoritativeCorrectionTimes = new();
+
+    private static readonly long AuthoritativeCorrectionIntervalTicks = TimeSpan.FromSeconds(1).Ticks;
+
     private bool ShouldBroadcastConfigChange(OwnConfigEntryBase syncedEntry)
     {
         return GetPackageServerControlled(syncedEntry) && ShouldIncludeConfigInPackage(syncedEntry);
     }
 
-    private bool CanBroadcastFromThisSide() => GameReflection.HasZNet && (isServer || !IsLocked && AllowClientConfigUpdatesWhenUnlocked);
+    private bool CanBroadcastFromThisSide()
+    {
+        if (!GameReflection.HasZNet)
+        {
+            return false;
+        }
+
+        if (isServer)
+        {
+            return true;
+        }
+
+        return InitialSyncDone
+               && (IsAdmin || !ServerLockEnabled && AllowClientConfigUpdatesWhenUnlocked);
+    }
 
     private bool ShouldDeferOutgoingBroadcasts => ProcessingServerUpdate || IsProcessing || IsSending || flushingPendingBroadcasts;
 
     private void OnConfigEntryChanged(ConfigEntryBase configEntry, OwnConfigEntryBase syncedEntry)
     {
-        if (!ShouldBroadcastConfigChange(syncedEntry) || configsBeingApplied.Contains(configEntry) || !CanBroadcastFromThisSide())
+        if (configsBeingApplied.Contains(configEntry))
         {
-            DebugLog(ConditionalConfigSyncDebugLevel.Trace, "ConfigChanged", $"Ignored {configEntry.Definition.Section}/{configEntry.Definition.Key}: mode={syncedEntry.SyncMode}, defaultServer={syncedEntry.SynchronizedConfig}, serverControlled={syncedEntry.IsServerControlled}, applying={configsBeingApplied.Contains(configEntry)}, canBroadcast={CanBroadcastFromThisSide()}");
+            return;
+        }
+
+        if (!IsWritableConfig(syncedEntry))
+        {
+            RestoreRejectedConfigChange(configEntry, syncedEntry, GetWriteRejectionReason(syncedEntry));
+            return;
+        }
+
+        syncedEntry.StoreLastAcceptedValue(configEntry.BoxedValue);
+
+        if (!ShouldBroadcastConfigChange(syncedEntry) || !CanBroadcastFromThisSide())
+        {
+            DebugLog(
+                ConditionalConfigSyncDebugLevel.Trace,
+                "ConfigChanged",
+                $"Kept local {configEntry.Definition.Section}/{configEntry.Definition.Key}: mode={syncedEntry.SyncMode}, defaultServer={syncedEntry.SynchronizedConfig}, serverControlled={syncedEntry.IsServerControlled}, canBroadcast={CanBroadcastFromThisSide()}");
             return;
         }
 
@@ -60,15 +94,48 @@ public partial class ConditionalConfigSync
         }
 
         DebugLog(ConditionalConfigSyncDebugLevel.Verbose, "ConfigChanged", $"Broadcast {configEntry.Definition.Section}/{configEntry.Definition.Key}");
-        StartBroadcastPackage(GameReflection.Everybody, ConfigsToPackage(configs: new[] { configEntry }));
+        StartBroadcastPackage(
+            GameReflection.Everybody,
+            ConfigsToPackage(configs: new[] { configEntry }, includeConfigStates: isServer));
     }
 
     private void OnCustomValueChanged(CustomSyncedValueBase customValue)
     {
-        if (customValuesBeingApplied.Contains(customValue) || !CanBroadcastFromThisSide())
+        if (customValuesBeingApplied.Contains(customValue))
         {
-            DebugLog(ConditionalConfigSyncDebugLevel.Trace, "CustomValue", $"Ignored {customValue.Identifier}: applying={customValuesBeingApplied.Contains(customValue)}, canBroadcast={CanBroadcastFromThisSide()}");
             return;
+        }
+
+        if (IsSourceOfTruth)
+        {
+            customValue.StoreLastAcceptedValue(customValue.BoxedValue);
+        }
+
+        if (!CanBroadcastFromThisSide())
+        {
+            if (!IsSourceOfTruth
+                && customValue.HasLastAcceptedValue
+                && !customValue.BoxedValuesEqual(customValue.BoxedValue, customValue.LastAcceptedValue))
+            {
+                customValuesBeingApplied.Add(customValue);
+                try
+                {
+                    customValue.BoxedValue = customValue.LastAcceptedValue;
+                }
+                finally
+                {
+                    customValuesBeingApplied.Remove(customValue);
+                }
+                DebugWarning("CustomValue", $"Restored protected custom value {customValue.Identifier} after a rejected local change");
+            }
+
+            DebugLog(ConditionalConfigSyncDebugLevel.Trace, "CustomValue", $"Ignored {customValue.Identifier}: canBroadcast={CanBroadcastFromThisSide()}");
+            return;
+        }
+
+        if (!IsSourceOfTruth)
+        {
+            customValue.StoreLastAcceptedValue(customValue.BoxedValue);
         }
 
         if (ShouldDeferOutgoingBroadcasts)
@@ -322,19 +389,14 @@ public partial class ConditionalConfigSync
     private bool HandleConfigSyncRPC(long sender, ZPackage package, bool clientUpdate)
     {
         bool receivedFromServer = !isServer && !clientUpdate;
-        ZPackage? packageToForward = null;
         string? activeFragmentCacheKey = null;
         lastHandledPackageWasFull = false;
         bool processingStarted = false;
+        ParsedConfigs? parsedClientUpdate = null;
 
         try
         {
             bool senderIsAdmin = !isServer || !clientUpdate || IsSenderAdmin(sender);
-            if (isServer && clientUpdate && IsLocked && !senderIsAdmin)
-            {
-                RejectSync($"Rejected config update from {FormatClient(sender)} because the configuration is locked.", sender, incoming: true);
-                return false;
-            }
 
             foreach (string expiredKey in cacheExpirations.Where(kv => kv.Key < DateTimeOffset.Now.Ticks).Select(kv => kv.Value).Distinct().ToArray())
             {
@@ -468,8 +530,18 @@ public partial class ConditionalConfigSync
                 return false;
             }
 
+            byte allowedFlags = (byte)(V2_PACKAGE | PARTIAL_CONFIGS);
+            if (isServer && clientUpdate && ((packageFlags & PARTIAL_CONFIGS) == 0 || (packageFlags & ~allowedFlags) != 0))
+            {
+                RejectClientUpdate(
+                    sender,
+                    senderIsAdmin,
+                    $"client updates must be partial packages without server transport flags; received flags={packageFlags}",
+                    null);
+                return false;
+            }
+
             GameReflection.PackageSetPos(package, 0);
-            packageToForward = GameReflection.NewPackage(GameReflection.PackageGetArray(package));
             packageFlags = GameReflection.PackageReadByte(package);
 
             lastHandledPackageWasFull = (packageFlags & PARTIAL_CONFIGS) == 0;
@@ -478,14 +550,15 @@ public partial class ConditionalConfigSync
                 ResetConfigsFromServer();
             }
 
-            ParsedConfigs configs = ReadConfigsFromPackage(package, receivedFromServer);
-
-            if (isServer && clientUpdate && !senderIsAdmin && lockedConfig != null
-                && (configs.configValues.ContainsKey(lockedConfig) || configs.configStates.ContainsKey(lockedConfig)))
+            ParsedConfigs configs = ReadConfigsFromPackage(package, receivedFromServer, strictClientUpdate: isServer && clientUpdate);
+            if (isServer && clientUpdate)
             {
-                ConfigDefinition definition = lockedConfig.BaseConfig.Definition;
-                RejectSync($"Rejected non-admin attempt from {FormatClient(sender)} to change protected locking config {definition.Section} -> {definition.Key}.", sender, incoming: true);
-                return false;
+                parsedClientUpdate = configs;
+                if (!TryAuthorizeClientUpdate(configs, sender, senderIsAdmin, out string rejectionReason))
+                {
+                    RejectClientUpdate(sender, senderIsAdmin, rejectionReason, configs);
+                    return false;
+                }
             }
 
             ApplyParsedConfigs(configs, receivedFromServer);
@@ -493,13 +566,19 @@ public partial class ConditionalConfigSync
             string source = isServer || clientUpdate ? FormatClient(sender) : "the server";
             InfoLog($"Received {configs.configValues.Count} configs and {configs.customValues.Count} custom values from {source}{GetSingleEntryReceiveDetails(configs)}");
 
-            if (isServer && clientUpdate && packageToForward != null)
+            if (isServer && clientUpdate)
             {
-                List<ZNetPeer> peers = GameReflection.GetPeers().Where(p => GameReflection.GetPeerUid(p) != sender).ToList();
-                if (peers.Count > 0)
-                {
-                    StartBroadcastPackage(peers, packageToForward);
-                }
+                string authorization = senderIsAdmin ? "administrator" : "configuration is unlocked and client updates are enabled";
+                LogAcceptedClientUpdate(sender, configs, authorization);
+
+                ZPackage canonicalPackage = ConfigsToPackage(
+                    configs.configValues.Keys.Select(config => config.BaseConfig),
+                    configs.customValues.Keys,
+                    partial: true,
+                    includeConfigValues: true,
+                    includeAllProvidedConfigStates: true,
+                    includeConfigStates: true);
+                StartBroadcastPackage(GameReflection.Everybody, canonicalPackage);
             }
 
             return true;
@@ -510,7 +589,16 @@ public partial class ConditionalConfigSync
             {
                 RemoveFragmentAssembly(activeFragmentCacheKey);
             }
-            RejectSync($"Error while applying config package: {e.Message}", receivedFromServer ? null : sender, incoming: true, e);
+
+            if (isServer && clientUpdate)
+            {
+                bool senderIsAdmin = IsSenderAdmin(sender);
+                RejectClientUpdate(sender, senderIsAdmin, $"malformed or unprocessable package: {e.Message}", parsedClientUpdate, e);
+            }
+            else
+            {
+                RejectSync($"Error while applying config package: {e.Message}", receivedFromServer ? null : sender, incoming: true, e);
+            }
             return false;
         }
         finally
@@ -525,6 +613,131 @@ public partial class ConditionalConfigSync
                 FlushPendingBroadcastsIfIdle();
             }
         }
+    }
+
+    private bool TryAuthorizeClientUpdate(ParsedConfigs configs, long sender, bool senderIsAdmin, out string rejectionReason)
+    {
+        ZNetPeer? senderPeer = GameReflection.GetRoutedPeer(sender);
+        if (senderPeer == null || !GameReflection.IsPeerReady(senderPeer))
+        {
+            rejectionReason = "the sender is not a ready connected peer";
+            return false;
+        }
+
+        if (!string.IsNullOrEmpty(configs.rejectionReason))
+        {
+            rejectionReason = configs.rejectionReason!;
+            return false;
+        }
+
+        if (configs.entryCount <= 0 || configs.configValues.Count == 0 && configs.customValues.Count == 0)
+        {
+            rejectionReason = "client update contains no applicable values";
+            return false;
+        }
+
+        foreach (OwnConfigEntryBase config in configs.configValues.Keys)
+        {
+            ConfigDefinition definition = config.BaseConfig.Definition;
+            if (config == lockedConfig && !senderIsAdmin)
+            {
+                rejectionReason = $"protected locking config {definition.Section} -> {definition.Key} requires administrator access";
+                return false;
+            }
+
+            if (!ComputeServerControlled(config))
+            {
+                rejectionReason = $"config {definition.Section} -> {definition.Key} is client-controlled by the server's effective policy";
+                return false;
+            }
+        }
+
+        if (senderIsAdmin)
+        {
+            rejectionReason = string.Empty;
+            return true;
+        }
+
+        if (ServerLockEnabled)
+        {
+            rejectionReason = "the server configuration is locked";
+            return false;
+        }
+
+        if (!AllowClientConfigUpdatesWhenUnlocked)
+        {
+            rejectionReason = "the mod does not allow non-admin client updates while the configuration is unlocked";
+            return false;
+        }
+
+        rejectionReason = string.Empty;
+        return true;
+    }
+
+    private void RejectClientUpdate(long sender, bool senderIsAdmin, string reason, ParsedConfigs? configs, Exception? exception = null)
+    {
+        string state = $"admin={senderIsAdmin}, serverLock={ServerLockEnabled}, unlockedClientUpdates={AllowClientConfigUpdatesWhenUnlocked}";
+        RejectSync($"Rejected config update from {FormatClient(sender)}: {reason} ({state}).", sender, incoming: true, exception);
+
+        if (configs != null)
+        {
+            foreach (OwnConfigEntryBase config in configs.configValues.Keys)
+            {
+                ConfigDefinition definition = config.BaseConfig.Definition;
+                DebugWarning("ConfigUpdate", $"Rejected {definition.Section} -> {definition.Key} from {FormatClient(sender)}: {reason} ({state})");
+            }
+            foreach (CustomSyncedValueBase customValue in configs.customValues.Keys)
+            {
+                DebugWarning("ConfigUpdate", $"Rejected custom value {customValue.Identifier} from {FormatClient(sender)}: {reason} ({state})");
+            }
+        }
+
+        SendAuthoritativeCorrection(sender, configs);
+    }
+
+    private void LogAcceptedClientUpdate(long sender, ParsedConfigs configs, string authorization)
+    {
+        foreach (OwnConfigEntryBase config in configs.configValues.Keys)
+        {
+            ConfigDefinition definition = config.BaseConfig.Definition;
+            LogSource.LogInfo($"[{GetDebugModName()}][Server][ConfigUpdate] Accepted {definition.Section} -> {definition.Key} from {FormatClient(sender)}: {authorization}");
+        }
+        foreach (CustomSyncedValueBase customValue in configs.customValues.Keys)
+        {
+            LogSource.LogInfo($"[{GetDebugModName()}][Server][ConfigUpdate] Accepted custom value {customValue.Identifier} from {FormatClient(sender)}: {authorization}");
+        }
+    }
+
+    private void SendAuthoritativeCorrection(long sender, ParsedConfigs? configs)
+    {
+        long now = DateTimeOffset.UtcNow.Ticks;
+        if (authoritativeCorrectionTimes.TryGetValue(sender, out long previous)
+            && now - previous < AuthoritativeCorrectionIntervalTicks)
+        {
+            return;
+        }
+
+        ZNetPeer? peer = GameReflection.GetRoutedPeer(sender);
+        if (peer == null || !GameReflection.IsPeerReady(peer))
+        {
+            return;
+        }
+
+        authoritativeCorrectionTimes[sender] = now;
+
+        bool requireFullSync = configs == null
+                               || !string.IsNullOrEmpty(configs.rejectionReason)
+                               || configs.configValues.Count == 0 && configs.customValues.Count == 0;
+        ZPackage correction = requireFullSync
+            ? CreateFullSyncPackage(peer)
+            : ConfigsToPackage(
+                configs.configValues.Keys.Select(config => config.BaseConfig),
+                configs.customValues.Keys,
+                partial: true,
+                includeConfigValues: true,
+                includeAllProvidedConfigStates: true,
+                includeConfigStates: true);
+        StartBroadcastPackage(new List<ZNetPeer> { peer }, correction);
     }
 
     internal static class ZNetShutdownPatch
@@ -915,7 +1128,7 @@ public partial class ConditionalConfigSync
             return;
         }
 
-        StartBroadcastPackage(target, ConfigsToPackage(configs: configs));
+        StartBroadcastPackage(target, ConfigsToPackage(configs: configs, includeConfigStates: isServer));
     }
 
     private void Broadcast(long target, params CustomSyncedValueBase[] customValues)
@@ -988,7 +1201,7 @@ public partial class ConditionalConfigSync
                 pendingConfigBroadcasts.Clear();
                 if (configs.Length > 0)
                 {
-                    StartBroadcastPackage(GameReflection.Everybody, ConfigsToPackage(configs: configs));
+                    StartBroadcastPackage(GameReflection.Everybody, ConfigsToPackage(configs: configs, includeConfigStates: isServer));
                 }
             }
 
