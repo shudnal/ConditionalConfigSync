@@ -1,3 +1,6 @@
+# 1.0.3
+* fixed initial handshake buffering so vanilla `PlayerList` and `AdminList` are delivered after `PeerInfo`, preserving `LocalPlayerIsAdminOrHost()` and the initial player list
+
 # 1.0.2
 * exposed a structured policy-control availability state so configuration UIs can distinguish a missing compatible server session from missing administrator access
 * renamed the public package metadata type from `PluginSelfInfo` to `PluginInfoCCS`

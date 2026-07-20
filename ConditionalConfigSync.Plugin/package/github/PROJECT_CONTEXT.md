@@ -348,8 +348,6 @@ Compatible configuration UIs may request an exact-setting ownership toggle only 
 
 The server persists a minimal exact rule and remains the source of truth. The UI request is not a direct local ownership mutation.
 
-`SynchronizationPolicyControlState` exposes the reason policy control is unavailable without requiring a UI to infer network or administrator state. It distinguishes fixed ownership, an unavailable or incompatible server session, missing administrator access, and an available operation.
-
 ## Custom synchronized values
 
 ### State values
@@ -406,13 +404,23 @@ Large packages are compressed and then fragmented when required. Fragment caches
 
 Do not remove limits merely to accommodate one unusually large mod value. First determine whether the data should be represented more compactly or split into an explicit application-level structure. If a limit is changed, update documentation and test malformed/oversized behavior.
 
-### Initial peer handshake ordering
+### Initial peer handshake buffering
 
-During server-side `RPC_PeerInfo` processing, CCS temporarily wraps the peer socket so the CCS full synchronization package can be sent before buffered vanilla initialization traffic is released. The wrapper must preserve the relative order of the initial vanilla RPCs.
+During the server-side `RPC_PeerInfo` admission path, CCS temporarily wraps the peer RPC socket so the CCS full synchronization package can be sent before selected vanilla initialization traffic is released. The wrapper must preserve the original send order of every buffered package.
 
-`PlayerList` and `AdminList` are registered by the client while it processes `PeerInfo`. They therefore must be buffered together with `PeerInfo`, `RoutedRPC`, and `ZDOData`; otherwise they can overtake `PeerInfo`, arrive before their handlers exist, and leave the initial player list or `LocalPlayerIsAdminOrHost()` state incorrect until a later refresh.
+The buffered vanilla methods are:
 
-The buffering implementation must preserve the original `ZPackage` cursor after inspecting the RPC method hash. Buffered packages must be cloned because Valheim may reuse the original package instance. `VersionMatch` must be replayed at the same logical position relative to the buffered packages, and the buffer must always be flushed from a `finally` path if CCS synchronization fails.
+- `PeerInfo`;
+- `PlayerList`;
+- `AdminList`;
+- `RoutedRPC`;
+- `ZDOData`.
+
+`PlayerList` and `AdminList` are not optional conveniences. The client registers their handlers while processing `PeerInfo`, so allowing either package to bypass the buffered `PeerInfo` package can make the initial RPC arrive before its handler exists. That loses the initial player list and can leave `LocalPlayerIsAdminOrHost()` incorrect until another vanilla refresh happens.
+
+When inspecting an outgoing package, restore its original read position before buffering or forwarding it. Buffered packages must be cloned because Valheim may reuse the original `ZPackage`. Release the queued packages in their captured order and replay a queued `VersionMatch` call at the exact relative position where it was requested.
+
+This ordering fix is transport-internal and does not change the CCS wire protocol.
 
 ## Deferred broadcasts and reentrancy
 
@@ -559,6 +567,7 @@ Exercise extra care in the following code paths:
 
 - source-of-truth transitions during `ZNet.Awake` and `ZNet.Shutdown`;
 - initial sync ordering relative to `InitialSyncDone` and read-only recalculation;
+- initial peer handshake buffering, especially `PeerInfo` before `PlayerList` and `AdminList`;
 - local fallback serialization while an active server value is present;
 - policy changes that switch active ownership without a new value package;
 - locking config registration after an earlier generic registration;
@@ -629,14 +638,15 @@ At minimum, run or reproduce the following before a release that touches synchro
 34. Duplicate, missing, inconsistent, expired, and oversized fragments are rejected and cleaned.
 35. Payload and entry limits reject explicitly without unbounded memory growth.
 36. One failing subscriber or one failed entry does not crash synchronization processing for unrelated entries.
-37. During initial connection, `PeerInfo`, `PlayerList`, and `AdminList` are released in a safe order; the initial player list is populated and `LocalPlayerIsAdminOrHost()` is correct without waiting for a later refresh.
-38. Initial handshake buffering preserves package cursors, package contents, and the relative `VersionMatch` position for both normal completion and synchronization failure paths.
+37. During initial peer admission, `PeerInfo`, `PlayerList`, and `AdminList` are released in original send order after the CCS full sync completes.
+38. A newly connected client receives the initial vanilla player list and reports `LocalPlayerIsAdminOrHost()` correctly without waiting for a later list refresh.
+39. Queued `VersionMatch` ordering remains correct when vanilla initialization packages are buffered.
 
 ### Compatibility
 
-39. Load an unchanged test consumer DLL compiled against the first public 1.x CCS API with the new core DLL; do not rebuild the consumer.
-40. Compare the new public API against the retained 1.x baseline and investigate every removal or signature change.
-41. Test a compatible older CCS client/server format whenever validation or package entry handling changes.
+40. Load an unchanged test consumer DLL compiled against the first public 1.x CCS API with the new core DLL; do not rebuild the consumer.
+41. Compare the new public API against the retained 1.x baseline and investigate every removal or signature change.
+42. Test a compatible older CCS client/server format whenever validation or package entry handling changes.
 
 ## Compatibility verification requirement
 
@@ -656,7 +666,7 @@ A dependent mod should declare the minimum CCS package version that provides the
 3. Confirm `ProtocolVersion` changed only if the wire contract is intentionally incompatible.
 4. Run public API compatibility checks.
 5. Run the unchanged old consumer.
-6. Run the permission, stale-UI, canonicalization, policy, lifecycle, and transport test matrix relevant to the change.
+6. Run the permission, stale-UI, canonicalization, policy, lifecycle, handshake-ordering, and transport test matrix relevant to the change.
 7. Build both assemblies against the intended Valheim/BepInEx references with no new warnings.
 8. Verify the plugin package contains both runtime DLLs and the core XML documentation.
 9. Verify dependent mod packages do not embed either CCS assembly.
@@ -726,6 +736,7 @@ Keep responsibilities separated. Do not grow one giant synchronization class fil
 - Deferred changes are queued, not silently dropped.
 - Subscriber failures are isolated.
 - Fragment and payload limits are explicit and bounded.
+- Initial vanilla handshake packages that depend on `PeerInfo` handler registration must remain buffered and ordered behind `PeerInfo`.
 - Source code remains C# 11 with conventional explicit syntax.
 - Core `AssemblyVersion` remains stable for compatible 1.x releases.
 - All repository content is English.

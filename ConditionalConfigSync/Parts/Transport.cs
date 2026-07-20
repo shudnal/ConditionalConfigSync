@@ -998,12 +998,25 @@ public partial class ConditionalConfigSync
                 }
             }
 
+            // The client registers PlayerList and AdminList handlers while processing PeerInfo,
+            // so these vanilla follow-up RPCs must not overtake the buffered PeerInfo package.
+            private static bool ShouldBufferInitialPackage(int methodHash)
+            {
+                return methodHash == GameReflection.StableHash("PeerInfo")
+                       || methodHash == GameReflection.StableHash("PlayerList")
+                       || methodHash == GameReflection.StableHash("AdminList")
+                       || methodHash == GameReflection.StableHash("RoutedRPC")
+                       || methodHash == GameReflection.StableHash("ZDOData");
+            }
+
             public new void Send(ZPackage pkg)
             {
                 int oldPos = GameReflection.PackageGetPos(pkg);
                 GameReflection.PackageSetPos(pkg, 0);
                 int methodHash = GameReflection.PackageReadInt(pkg);
-                if ((methodHash == GameReflection.StableHash("PeerInfo") || methodHash == GameReflection.StableHash("RoutedRPC") || methodHash == GameReflection.StableHash("ZDOData")) && !finished)
+                GameReflection.PackageSetPos(pkg, oldPos);
+
+                if (!finished && ShouldBufferInitialPackage(methodHash))
                 {
                     ZPackage newPkg = GameReflection.NewPackage(GameReflection.PackageGetArray(pkg));
                     GameReflection.PackageSetPos(newPkg, oldPos);
@@ -1011,7 +1024,6 @@ public partial class ConditionalConfigSync
                 }
                 else
                 {
-                    GameReflection.PackageSetPos(pkg, oldPos);
                     GameReflection.SocketSend(Original, pkg);
                 }
             }
