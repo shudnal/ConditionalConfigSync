@@ -183,6 +183,28 @@ conditionalconfigsync_policy_dump
 
 Debug logging supports `Basic`, `Verbose`, and `Trace` levels and an optional mod-name filter. Normal startup stays quiet; warnings and errors remain visible without debug logging.
 
+### Connection rejection diagnostics
+
+Version-check disconnects are always written as errors, independently of the debug logging configuration. Server logs distinguish these cases:
+
+- no matching version handshake was received before `PeerInfo`;
+- a legacy or incomplete handshake omitted the CCS protocol field;
+- the reported CCS protocol differs from the required protocol;
+- the remote mod version or minimum version is malformed;
+- the remote mod is older than the local minimum, or the remote minimum is newer than the local mod.
+
+Successful receive logs include the remote peer identifier. New CCS releases also append their package version to the existing protocol 1 handshake as optional diagnostic metadata; older protocol 1 peers remain compatible and are shown as `not reported`.
+
+Before the server sends Valheim's version error, CCS sends one bounded structured disconnect report containing a report ID and one or more reason codes. The same report ID is written to the server and client logs for correlation. A current client associates the report with the active connection attempt, preserves it across the failed `ZNet` shutdown long enough for the main menu to display it, and discards stale reports after a new connection, a successful admission, display, or a short timeout.
+
+CCS does not create or own a separate error window. It appends its English explanation only when the current connection has an explicit pending CCS report; a generic `ErrorVersion` from another compatibility provider is not treated as a CCS failure. The report is appended to the existing Valheim connection-error text before Jotunn and ServerSync process the same form:
+
+- Jotunn keeps its own compatibility window and receives the already enriched failed-connection text;
+- ServerSync may append its own diagnostics to the same vanilla text;
+- when Jotunn does not replace the vanilla panel, CCS performs an idempotent one-frame layout normalization after the other postfixes finish.
+
+Older clients that do not register the disconnect-report RPC still receive the normal Valheim version error and must use the server log for the detailed cause. If CCS is entirely absent or fails before registering its RPC on the rejected client, no CCS implementation exists there to display the server-provided reason.
+
 ## For mod authors
 
 Conditional Config Sync is a third-party standalone dependency. Do not embed it with ILRepack and do not ship private copies inside individual mods.
@@ -247,6 +269,8 @@ The behavior is symmetric:
 | Client or server | `false` | Remote peer | Connection is allowed and this mod instance is not synchronized with the missing remote copy |
 
 Use `true` for server-authoritative, world-state, gameplay, or other two-sided mods. A mod such as Seasons, which synchronizes the current season, day, settings, and runtime state, must require its remote copy. Leave the default `false` only for a genuinely client-only mod or an optional integration that remains correct when the other side does not have it.
+
+When a client-side optional instance receives no matching server handshake and the connection completes successfully, CCS returns that instance to local source-of-truth ownership. Its local values remain editable and are not published to the server. This is not an initial server synchronization, so `InitialSyncDone` remains false and `InitialSyncCompleted` is not raised.
 
 When the remote copy exists, `CurrentVersion`, `MinimumRequiredVersion`, and the CCS wire protocol are used for compatibility checks. Late registration or `RequestFullSync()` does not repeat connection admission, so configure `ModRequired` while creating the `ConfigSync` instance.
 

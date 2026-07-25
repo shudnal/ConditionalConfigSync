@@ -107,6 +107,45 @@ public partial class ConditionalConfigSync
         }
     }
 
+    internal void UseLocalStateForMissingOptionalServer()
+    {
+        if (isServer || IsSourceOfTruth || ModRequired)
+        {
+            return;
+        }
+
+        bool wasProcessingServerUpdate = ProcessingServerUpdate;
+        ProcessingServerUpdate = true;
+        try
+        {
+            // The owning mod is optional and the successful peer handshake proved that the server did not
+            // provide a matching ConfigSync instance. Return this instance to its normal local role instead
+            // of leaving every registered setting in the fail-closed pre-sync replica state.
+            InitialSyncDone = false;
+            ResetConfigsFromServer();
+            IsSourceOfTruth = true;
+            ServerLockedSettingChanged();
+            pendingConfigBroadcasts.Clear();
+            pendingCustomValueBroadcasts.Clear();
+            pendingSequencedCustomValuePackages.Clear();
+            foreach (string cacheKey in configValueCache.Keys.ToArray())
+            {
+                RemoveFragmentAssembly(cacheKey);
+            }
+
+            LogSource.LogInfo(
+                $"[{GetDebugModName()}][Client][Version] No server handshake was received for this optional mod; using local config ownership for this session.");
+        }
+        catch (Exception e)
+        {
+            DebugWarning("Version", $"Failed to restore local ownership for an optional mod without a server handshake: {e}");
+        }
+        finally
+        {
+            ProcessingServerUpdate = wasProcessingServerUpdate;
+        }
+    }
+
     private void RegisterServerRpcHandlers()
     {
         if (serverRpcsRegistered || !GameReflection.HasZRoutedRpc)
@@ -390,7 +429,7 @@ public partial class ConditionalConfigSync
             sync.ResetSessionRegistrationState();
         }
 
-        VersionCheck.ResetSessionState();
+        VersionCheck.ResetSessionState(VersionCheck.HasPendingConnectionError());
         StopPolicySupport();
 
         lock (mainThreadQueueLock)

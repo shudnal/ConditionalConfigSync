@@ -75,7 +75,8 @@ public partial class ConditionalConfigSync
     /// Leave this <see langword="false"/> only when the mod can operate correctly while absent from the remote side,
     /// such as a genuinely client-only or otherwise optional integration. The local BepInEx hard dependency on
     /// Conditional Config Sync is separate: it requires CCS on the same machine as the owning mod, not automatically
-    /// on the remote server or client.
+    /// on the remote server or client. After successful client admission without a matching server handshake, the
+    /// optional instance returns to local source-of-truth ownership; this does not count as a completed server sync.
     /// </para>
     /// <para>Set this before a connection is established, preferably in the object initializer.</para>
     /// </remarks>

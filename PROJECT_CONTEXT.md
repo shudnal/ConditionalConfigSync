@@ -4,6 +4,341 @@ This document is the durable engineering context for Conditional Config Sync (CC
 
 Read this file before making architectural, networking, compatibility, policy, lifecycle, or packaging changes. Read the current source code as the final authority when implementation details have evolved, and update this document whenever a project decision changes.
 
+## Current handoff snapshot — 2026-07-23
+
+This section is the shortest path for starting a new chat or resuming work after context loss. It records the exact accepted baseline, the current unreleased release state, the incident that motivated the latest work, and the non-negotiable implementation decisions. The remainder of this document contains the deeper architecture and historical rationale.
+
+### Accepted source lineage
+
+The authoritative pre-1.0.3 reference supplied by the owner is `ConditionalConfigSync(7).zip`. Any future comparison against the 1.0.2-era code must use that archive, not an older reconstructed working tree.
+
+A previously generated 1.0.3 archive was rejected because it had accidentally been based on an older source state and regressed the structured policy-control API. In particular, it lost or reverted:
+
+- `ConfigSyncPolicyControlState.cs`;
+- `PolicyControl.GetPolicyControlStateFor(...)`;
+- `SyncedConfigEntry.SynchronizationPolicyControlState`;
+- the related README, CHANGELOG, and project-context documentation.
+
+Those regressions were not intentional. Do not use `ConditionalConfigSync_1.0.3_Release_20260721_0123.zip` as a baseline.
+
+The corrected 1.0.3 project was produced by applying only the initial-handshake transport fix and release metadata to `ConditionalConfigSync(7).zip`. The policy-control files in the corrected project were verified byte-for-byte against the reference. The 1.0.3 functional change was:
+
+- buffer vanilla `PlayerList` and `AdminList` together with `PeerInfo`, `RoutedRPC`, and `ZDOData`;
+- release them only after `PeerInfo`, preserving the initial player list and `LocalPlayerIsAdminOrHost()`;
+- restore the inspected `ZPackage` cursor before buffering or forwarding;
+- retain protocol version 1 and core assembly identity `1.0.0.0`.
+
+The current 1.0.4 work starts from the corrected 1.0.3 state plus the version-diagnostics work in `ConditionalConfigSync_1.0.4_VersionDiagnostics_20260722_1217.zip`. Version 1.0.4 is still unreleased in this handoff. The latest source tree must retain every API and transport change from the accepted reference and 1.0.3.
+
+### Current release identity
+
+- Package version: `1.0.4`
+- CCS wire protocol: `1`
+- Disconnect-report subformat: `1`
+- Core `AssemblyVersion`: `1.0.0.0`
+- Core and plugin file/informational version: `1.0.4`
+- BepInEx GUID and Harmony owner: `_shudnal.ConditionalConfigSync`
+- Jotunn Harmony owner used only for patch ordering: `com.jotunn.jotunn`
+- ServerSync Harmony owner used only for patch ordering: `org.bepinex.helpers.ServerSync`
+
+The additional package-version string in the ordinary version handshake is an optional trailing protocol-1 field. It does not justify a CCS protocol bump. The disconnect report is a separate best-effort RPC with its own internal format version and likewise does not change the main protocol.
+
+### Visual Studio CPS project-tree compatibility
+
+Visual Studio reported the `ConditionalConfigSync.Plugin` project as `LimitedFunctionality` while builds and Thunderstore packaging continued to work. The ActivityLog exception stated that `Thunderstore.targets` was found in an invalid project-tree state with both `ProjectImport` and `FileOnDisk`/`FileSystemEntity` flags.
+
+The project is SDK-style, so files without another build action are implicitly included as `None` items. `Thunderstore.targets` was also explicitly imported at the bottom of `ConditionalConfigSync.Plugin.csproj`. MSBuild could evaluate this correctly, which is why compilation and packaging worked, but Visual Studio CPS attempted to represent the same physical path as both a regular project item and an imported project and failed while constructing the physical project tree.
+
+The accepted project-file form is:
+
+```xml
+<ItemGroup>
+  <None Remove="Thunderstore.targets" />
+</ItemGroup>
+
+<Import Project="$(MSBuildProjectDirectory)\Thunderstore.targets"
+        Condition="Exists('$(MSBuildProjectDirectory)\Thunderstore.targets')" />
+```
+
+Preserve all three details:
+
+1. remove only `Thunderstore.targets` from the implicit `None` list;
+2. keep the packaging logic in the separate imported file;
+3. use a normalized project-directory path with an existence condition.
+
+Do not disable `EnableDefaultNoneItems` for the whole project merely to solve this collision, because that would unnecessarily remove normal non-code project files from SDK item discovery. This is a project-system compatibility fix only: package version remains `1.0.4`, wire protocol remains `1`, and no runtime assembly behavior changes.
+
+Regression checks for packaging-project changes:
+
+- opening or reloading `ConditionalConfigSync.Plugin.csproj` in Visual Studio must not produce `LimitedFunctionality` or a duplicate `Thunderstore.targets` project-tree node;
+- `Thunderstore.targets` must still be imported and its packaging targets must remain available to MSBuild;
+- a normal plugin build must still stage the Thunderstore and GitHub release artifacts;
+- the project must not globally disable SDK default `None` items.
+
+### 1.0.4 optional-server ownership fix and ConfigurationManager companion release
+
+The 2026-07-23 investigation used two logs from the same Linux client session and the `ConfigurationManager(9).zip` source archive. The client loaded CCS `1.0.3`, Valheim Configuration Manager `1.1.15`, Jotunn `2.29.2`, and My Little UI `1.2.15`. The server sent CCS handshakes for Valheim Configuration Manager, Extra Slots, Extra Slots Custom Slots, and Longship Upgrades, but no My Little UI handshake was present. Jotunn later confirmed that the account was an administrator.
+
+My Little UI is intentionally optional on the remote side:
+
+- its `ConfigSync` uses `ModRequired = false`;
+- its ordinary settings are registered as `Conditional`;
+- its locking entry is fixed `AlwaysServerControlled`.
+
+The client therefore had a valid optional client-only deployment: My Little UI was installed locally and absent from the server. The connection was correctly admitted, but CCS left that `ConfigSync` in the pre-sync replica state established during `ZNet.Awake`:
+
+- `IsSourceOfTruth = false`;
+- `InitialSyncDone = false`;
+- `IsWritableConfig(...)` deliberately fails closed before initial synchronization;
+- the process-wide administrator exemption received through another CCS consumer could not bypass the earlier `InitialSyncDone` gate.
+
+This was a CCS lifecycle bug, not a My Little UI registration bug. It could affect any pre-connection CCS consumer with `ModRequired = false` when the connected server did not provide the same consumer.
+
+The accepted fix is performed only after successful client `RPC_PeerInfo` completion. For every version check backed by a `ConfigSync`, CCS now resolves missing optional server presence when all of the following are true:
+
+- the local side is a client;
+- the version check is backed by a `ConfigSync`;
+- `ModRequired` is false;
+- no matching server handshake was received;
+- peer admission completed without `ErrorVersion`.
+
+The affected `ConfigSync` then:
+
+1. keeps `InitialSyncDone = false`, because no complete server package was applied;
+2. restores local fallback values and default ownership/visibility state;
+3. returns to `IsSourceOfTruth = true`;
+4. recalculates ConfigurationManager `ReadOnly` and `Browsable` metadata;
+5. clears pending outbound packages and fragment state;
+6. writes one normal informational log that local ownership is used for this optional mod.
+
+It deliberately does **not** raise `InitialSyncCompleted`, because absence of a server provider is not synchronization. It also does not publish local values to the server: client broadcasting still requires `InitialSyncDone`, so the optional local instance remains local-only for that session. `SourceOfTruthChanged(true)` remains the lifecycle signal for consumers that care about the role transition.
+
+Do not replace this fix by merely moving the administrator check ahead of the `InitialSyncDone` fail-closed gate. That would weaken the pre-sync security invariant, leave non-admin optional clients read-only, and conflate administrator authorization with the absence of a remote synchronization provider.
+
+The supplied Configuration Manager source contained a second, independent use of vanilla administrator state:
+
+```csharp
+return hiddenSettings.Value.Count > 0 && ZNet.instance != null && !ZNet.instance.LocalPlayerIsAdminOrHost();
+```
+
+That check controls whether the server-provided hidden-settings list is applied. Configuration Manager `1.1.16` replaces it with CCS's effective administrator state:
+
+```csharp
+return hiddenSettings.Value.Count > 0 && !configSync.IsAdmin;
+```
+
+This companion change prevents delayed or stale vanilla `AdminList` data from hiding settings from an administrator. It is separate from the My Little UI read-only failure: My Little UI was blocked by CCS's unresolved optional replica state, while Configuration Manager's own hidden-settings filter directly consulted vanilla `LocalPlayerIsAdminOrHost()`.
+
+Release relationship for this handoff:
+
+- CCS remains package version `1.0.4`, protocol `1`, core `AssemblyVersion` `1.0.0.0`;
+- Configuration Manager is raised from `1.1.15` to `1.1.16`;
+- Configuration Manager `1.1.16` declares Conditional Config Sync `1.0.4` as its minimum package dependency;
+- My Little UI source does not need a code change for this incident.
+
+Known boundary: a `ConfigSync` constructed only after peer admission cannot have participated in the completed version handshake. Existing late-registration resync behavior remains in place; this 1.0.4 fix resolves optional consumers that existed during the connection handshake, which includes the reported My Little UI case.
+
+### 1.0.4 version-diagnostics requirements
+
+Version admission failures must be logged as unconditional errors. They must never depend on `ConditionalConfigSync.Debug.cfg`, debug level, or the mod-name filter.
+
+Each server-side rejection produces a unique report ID. The server writes an unconditional error summary containing that ID, reason count, and remote identifier before attempting the report RPC; a current client logs the same ID when it receives the report. This provides a direct correlation key between the dedicated-server log and the rejected player's log.
+
+The server must distinguish at least:
+
+- no matching handshake for the required consumer mod;
+- handshake received without the CCS protocol field;
+- explicit protocol mismatch;
+- malformed remote mod-version data;
+- malformed local version requirements;
+- remote mod older than the local minimum;
+- local mod older than the remote minimum;
+- malformed version packages.
+
+Successful server-side receive logs include the same remote client identifier later used in rejection logs. Received handshake state is per `ZRpc`; simultaneous connections must not overwrite each other's versions, protocol, package-version metadata, timing, or rejection reason.
+
+For a missing handshake, server diagnostics must not claim that the mod is definitely absent. The server only knows that it did not receive the required handshake. Current user-facing and administrator-facing potential causes are intentionally limited to:
+
+- the consumer mod is missing or disabled;
+- an older pre-CCS consumer-mod build is installed;
+- CCS is missing or failed to load;
+- a duplicate or outdated DLL is present.
+
+Do not currently advertise a packet-order race as a likely player-facing cause.
+
+### Incident evidence from `LogOutput (60).log`
+
+The reported Longship Upgrades incident was analyzed by grouping the dedicated-server log into connection attempts.
+
+Server startup showed:
+
+- Conditional Config Sync `1.0.3`;
+- Longship Upgrades `1.0.17`.
+
+Observed clients:
+
+| Steam ID | Player | Successful CCS handshakes | CCS rejections | Recorded behavior |
+|---|---|---:|---:|---|
+| `76561197977100993` | `betlog` | 5 | 0 | Always succeeded |
+| `76561198822797834` | `jaren` | 3 | 0 | Always succeeded |
+| `76561199128971616` | `saitamasway` | 7 | 0 | Always succeeded |
+| `76561198057634224` | name not received | 0 | 4 | Always rejected |
+| `76561198372601265` | name not received | 0 | 2 | Always rejected |
+
+Totals: 21 attempts, 15 successful Longship Upgrades CCS handshakes, 6 CCS rejections, 5 unique clients.
+
+The affected clients passed the version checks for the other ServerSync-based mods, but the server never logged a Longship Upgrades CCS receive line for them. The behavior was therefore consistent per client installation, not intermittent for the same Steam ID. This strongly supports a client-profile difference rather than a server-wide random failure.
+
+### Player-visible CCS rejection architecture
+
+CCS owns the rejection reason but must not own a separate modal window.
+
+The accepted flow is:
+
+1. The rejecting side creates one structured report containing a unique report ID and one or more reason items.
+2. The server logs every rejection reason unconditionally.
+3. The server sends the bounded report through the direct `ConditionalConfigSync DisconnectReason` RPC.
+4. The server invokes vanilla `ErrorVersion`.
+5. The current client stores the report for the active connection generation; it does not open UI from the RPC handler.
+6. `FejdStartup.ShowConnectError` appends the CCS explanation to the existing Valheim error text.
+7. Jotunn may copy that enriched text into its own compatibility window.
+8. Otherwise the vanilla panel, optionally also modified by ServerSync, displays the combined text.
+9. A one-frame deferred normalization adjusts only the still-active vanilla panel after all synchronous postfixes finish.
+
+The central compatibility invariant is: **append, never replace**.
+
+CCS must not:
+
+- hide the vanilla panel;
+- destroy or replace Jotunn's compatibility window;
+- clear ServerSync text;
+- create a second competing modal;
+- assume it is the only error provider;
+- repeatedly resize or move the confirmation button.
+
+### Jotunn compatibility details
+
+Jotunn patches `FejdStartup.ShowConnectError` with a last-priority postfix. When Jotunn has valid server version data and the status is `ErrorVersion`, it reads `m_connectionFailedError.text`, starts its own compatibility-window coroutine, and hides the vanilla panel.
+
+CCS therefore installs its text-injection postfix at first priority and explicitly orders it before `com.jotunn.jotunn`. Jotunn then receives the CCS-enriched failed-connection text and keeps its own independent window and layout.
+
+The CCS one-frame layout coroutine must immediately stop if the vanilla panel is no longer active. This is the expected Jotunn path, not an error.
+
+There is no compile-time or runtime API dependency on Jotunn. The Harmony owner string is used only for deterministic ordering when both mods are installed.
+
+### ServerSync compatibility details
+
+ServerSync appends its own version messages to `m_connectionFailedError.text` and expands the vanilla panel in a `ShowConnectError` postfix.
+
+CCS explicitly orders its injection before `org.bepinex.helpers.ServerSync`. ServerSync can therefore append its own diagnostics after the CCS block. CCS defers layout normalization by one frame, calculates the target from the final rendered text, and only increases the current panel dimensions by the missing delta. The confirmation button moves only by half of that additional height. Repeating the same error-display path for one connection generation must not move it again.
+
+There is no compile-time or runtime API dependency on ServerSync.
+
+### Disconnect-report wire layout
+
+The current structured disconnect-report format is internal and bounded:
+
+```text
+int    report format version = 1
+string report ID
+string server CCS package version
+int    server CCS protocol version
+int    reason count (0..32)
+repeat reason count:
+    byte   reason code
+    string mod display name (normalized and bounded)
+    string English reason text (single-line, normalized and bounded)
+```
+
+Current reason codes:
+
+- `Unknown`
+- `HandshakeMissing`
+- `ProtocolNotReported`
+- `ProtocolMismatch`
+- `RemoteVersionInvalid`
+- `LocalVersionInvalid`
+- `RemoteVersionTooOld`
+- `LocalVersionTooOld`
+- `MalformedHandshake`
+- `MissingConsumerRegistration`
+
+The receiver rejects reports larger than 512 KiB, invalid counts, unsupported small structured-format versions, and trailing bytes; it bounds all fields, escapes angle brackets before TMP display, and accepts the plain-string format used by early unreleased 1.0.4 builds as a temporary compatibility fallback.
+
+The final displayed message is capped at 8192 characters. A structured report is associated with the connection generation captured when its direct RPC handler is registered. Reports from an older `ZRpc` cannot be shown for a newer connection.
+
+### Pending-reason lifecycle
+
+A pending report is retained for at most 30 seconds and is cleared when:
+
+- a new client connection starts;
+- peer admission succeeds;
+- the report is appended to the error text;
+- the report expires;
+- the runtime shuts down normally.
+
+A failed `ZNet` shutdown commonly happens before the main-menu error form is displayed. `ResetNetworkSessionState()` therefore preserves the UI handoff only when a current pending CCS report already exists. Such a report is created either by the server's disconnect-report RPC, by a client-side CCS admission rejection before `Logout()`, or by the bounded fallback for an unreadable CCS disconnect report. Ordinary handshake state is cleared, while the report and active connection generation survive until `ShowConnectError` consumes them. Plugin destruction still force-clears everything.
+
+CCS must not infer ownership of an error from `ErrorVersion` alone and must not synthesize a report merely because an incomplete handshake state remains. Jotunn, ServerSync, or another mod may have caused that version error. This exact-origin rule prevents CCS text from contaminating another compatibility provider's rejection window.
+
+This preservation is required. Clearing an already-created report unconditionally in `ZNet.Shutdown` would reproduce the original user-visible problem even though the reason RPC had been received successfully.
+
+### Client-version behavior
+
+- Server 1.0.4 with client 1.0.4: full server diagnostics, remote CCS package version, structured report, and player-visible reason.
+- Server 1.0.4 with client 1.0.3: detailed server diagnostics still work; the old client normally sees only vanilla `ErrorVersion`.
+- Server 1.0.3 with client 1.0.4: protocol 1 remains compatible and the optional package-version field is ignored by old handlers; if that old server rejects the client, it cannot send the new structured report, so the player normally sees only the vanilla error.
+- Client without CCS or with CCS failing before RPC registration: the server can log the cause and send best effort, but no CCS code exists on the client to display the report.
+
+Do not promise a player-visible CCS reason when CCS itself is absent from the rejected client.
+
+### Files intentionally changed by the latest UI refinement
+
+Functional code:
+
+- `ConditionalConfigSync/VersionCheck.cs`
+- `ConditionalConfigSync/GameReflection.cs`
+- `ConditionalConfigSync/Parts/Stabilization.cs`
+
+Documentation:
+
+- `README.md`
+- `CHANGELOG.md`
+- `PROJECT_CONTEXT.md`
+- staged GitHub and Thunderstore README/CHANGELOG copies
+
+No policy-control, configuration-ownership, synchronization-package, or transport behavior should change as part of this UI refinement.
+
+### 1.0.4 compilation follow-up
+
+A user-side build of the prepared 1.0.4 source exposed `CS0103` for `Canvas.ForceUpdateCanvases()` in `VersionCheck.NormalizeConnectionErrorLayout`. The project intentionally references `UnityEngine.CoreModule` and `UnityEngine.UI`, but not `UnityEngine.UIModule`, which is where `UnityEngine.Canvas` is defined in the modular Unity assemblies used by the target setup.
+
+The accepted fix is to remove the unnecessary `Canvas.ForceUpdateCanvases()` call instead of adding a new `UnityEngine.UIModule` reference solely for that line. Layout normalization already waits one frame, then calls `TMP_Text.ForceMeshUpdate()` and `LayoutRebuilder.ForceRebuildLayoutImmediate(...)`, which are sufficient for the bounded vanilla error-panel recalculation used here.
+
+This correction does not change runtime ownership, synchronization, admission, disconnect-report, protocol, public API, or assembly-identity behavior. If future code directly uses `Canvas` or another type from `UnityEngine.UIModule`, the project reference must be added explicitly rather than assuming that `UnityEngine.dll` or `UnityEngine.UI.dll` provides it.
+
+### Validation status for this handoff
+
+The available environment does not contain a .NET/Mono compiler or the Valheim/BepInEx reference assemblies, so a real build and runtime test cannot be claimed.
+
+Before release, perform at minimum:
+
+- compile both assemblies against the intended stable/publicized Valheim references;
+- connect a current rejected client without Jotunn or ServerSync and verify the vanilla panel;
+- connect with ServerSync installed and verify both text blocks and one stable button position;
+- connect with Jotunn installed and verify only Jotunn's compatibility window is visible and contains the CCS text;
+- connect with both Jotunn and ServerSync;
+- reject for every reason code;
+- test two simultaneous clients with different results;
+- verify an old client still disconnects normally;
+- verify normal successful connection clears pending data;
+- verify a failed shutdown preserves the report until the main menu displays it;
+- verify a second connection never shows the first connection's report;
+- verify no public API or assembly identity change;
+- verify protocol remains 1;
+- scan all repository text for accidental Cyrillic;
+- synchronize staged release documentation.
+
 ## Repository language and documentation policy
 
 All repository content must be written in English. This includes source identifiers, comments, XML documentation, logs, exceptions, validation messages, configuration templates, scripts, filenames, directory names, release notes, commit drafts, and technical documentation. Intentional localization resources are the only exception.
@@ -445,6 +780,8 @@ A late resync updates data and policy state. It does not retroactively repeat th
 - On a client with `ModRequired = true`, the server must have a compatible copy of the owning mod.
 - On a server with `ModRequired = true`, connecting clients must have a compatible copy of the owning mod.
 - With `ModRequired = false`, the remote side may lack the owning mod.
+- After successful client peer admission, a pre-existing optional client instance with no matching server handshake returns to local source-of-truth ownership instead of remaining a fail-closed replica.
+- That local fallback path does not set `InitialSyncDone`, does not raise `InitialSyncCompleted`, and does not allow client-to-server publication.
 
 Set it before connection. Late changes cannot retroactively redo an already completed handshake.
 
@@ -462,15 +799,36 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Linq;
 using System.Reflection;
+using TMPro;
 using UnityEngine;
+using UnityEngine.UI;
 ```
 
-Do not conflate package version, dependent mod version, assembly identity, and wire protocol. They solve different problems:
+Do not conflate package version, dependent mod version, assembly identity, the main CCS protocol, and the disconnect-report format. They solve different problems:
 
 - package/file version identifies the release;
 - core `AssemblyVersion` provides stable ABI identity;
 - dependent mod version controls that mod's compatibility policy;
-- `ProtocolVersion` controls network format compatibility.
+- `ProtocolVersion` controls ordinary CCS network compatibility;
+- `DisconnectReportFormatVersion` versions only the optional player-facing rejection report.
+
+The ordinary version packet remains:
+
+```text
+string consumer GUID
+string remote minimum consumer version
+string remote current consumer version
+int    CCS protocol version
+string optional CCS package version
+```
+
+Protocol-1 peers that omit the optional final string are valid and are logged as `not reported`.
+
+`VersionCheck` stores received client handshakes by `ZRpc`, not in process-global current-version fields. Validation and logging must always use the state belonging to the peer currently entering `RPC_PeerInfo`.
+
+The direct disconnect-report RPC is registered during the client's `OnNewConnection` prefix. The handler closure captures the current connection generation. It only records bounded data and never opens UI directly.
+
+The `ShowConnectError` postfix uses first priority and explicit `before` ordering for Jotunn and ServerSync. It appends the CCS block synchronously, then defers only the vanilla-panel layout calculation by one frame.
 
 ## Logging and diagnostics
 
@@ -548,7 +906,7 @@ Avoided whenever possible. A shared dependency must prioritize ecosystem continu
 - A third-party Harmony prefix with higher/equivalent priority can interfere with any runtime patch. Server authorization remains the final boundary.
 - A rollback may still cause a restoration notification when an invalid write already reached BepInEx's setting-change path. The invalid value itself is suppressed from normal notification by the CCS high-priority guard.
 - Hidden configuration remains discoverable and editable through direct files or custom tools when ownership permits.
-- Late-created ConfigSync instances cannot retroactively reject a peer that already completed admission.
+- Late-created ConfigSync instances cannot retroactively reject a peer that already completed admission. A late-created optional client instance also cannot use the completed handshake to prove server absence; it relies on the existing explicit resync path.
 - Exact protocol matching does not guarantee that every dependent mod has identical optional content unless that mod correctly sets `ModRequired` and its own version requirements.
 - Very large custom values can still be expensive within the accepted hard limits; limits protect memory, not application-level efficiency.
 - The library cannot guarantee that a mod is semantically safe when an administrator forces a conditional setting to client ownership. Mod authors must choose fixed modes for settings that cannot diverge.
@@ -559,6 +917,7 @@ Exercise extra care in the following code paths:
 
 - source-of-truth transitions during `ZNet.Awake` and `ZNet.Shutdown`;
 - initial sync ordering relative to `InitialSyncDone` and read-only recalculation;
+- successful optional-mod absence resolution after `RPC_PeerInfo`, including restoration of local ownership without raising `InitialSyncCompleted`;
 - local fallback serialization while an active server value is present;
 - policy changes that switch active ownership without a new value package;
 - locking config registration after an earlier generic registration;
@@ -609,34 +968,60 @@ At minimum, run or reproduce the following before a release that touches synchro
 23. Rejected known value receives a partial authoritative correction.
 24. Malformed or metadata-conflicting update receives a rate-limited full correction.
 
+
+
 ### Lifecycle
 
-25. Change a local fallback, connect to a server value, disconnect: local fallback is restored and remains persisted.
-26. Switch policy server -> client -> server at runtime: active values and read-only state follow the effective owner.
-27. Late register a config and custom value on server and client: one batched resync supplies correct state.
-28. Reconnect to a different server: no fragment, policy, admin, pending-update, or value state leaks from the previous session.
+25. Client has an early-created `ModRequired = false` consumer that is absent on the server: connection succeeds, the instance returns to `IsSourceOfTruth = true`, local settings are writable, `InitialSyncDone` remains false, and no client update is sent.
+26. Repeat while another CCS consumer provides the process-wide admin exemption: the optional absent consumer must still resolve by ownership, not by weakening the initial-sync gate.
+27. Optional consumer exists on both sides: the normal handshake and full sync complete; it must not be incorrectly converted back to local ownership.
+28. Required consumer is absent on either side: version admission still rejects the connection and the optional-absence resolver must not run.
+29. Subscribe to `SourceOfTruthChanged`, `InitialSyncCompleted`, and `ServerConnectionReset`: optional absence raises only the role transition required by the implementation and never reports a completed server sync.
+30. Keep Configuration Manager open during connection: My Little UI rows become editable after successful admission when the server lacks My Little UI, without reopening the window.
+31. Provide a Configuration Manager hidden-settings list from the server and connect as an administrator: Configuration Manager `1.1.16` must use `configSync.IsAdmin` and must not hide those rows because of stale vanilla `AdminList` state.
+32. Change a local fallback, connect to a server value, disconnect: local fallback is restored and remains persisted.
+33. Switch policy server -> client -> server at runtime: active values and read-only state follow the effective owner.
+34. Late register a config and custom value on server and client: one batched resync supplies correct state.
+35. Reconnect to a different server: no fragment, policy, admin, pending-update, or value state leaks from the previous session.
 
 ### Custom values
 
-29. Normal custom value equal assignments coalesce/suppress as documented.
-30. Sequenced equal assignments are delivered as separate events in order.
-31. Unauthorized direct custom-value change on a client is restored.
-32. Deferred custom changes made during package processing flush with correct state/event semantics.
+36. Normal custom value equal assignments coalesce/suppress as documented.
+37. Sequenced equal assignments are delivered as separate events in order.
+38. Unauthorized direct custom-value change on a client is restored.
+39. Deferred custom changes made during package processing flush with correct state/event semantics.
 
 ### Transport and robustness
 
-33. Compression and fragmentation boundaries round-trip correctly.
-34. Duplicate, missing, inconsistent, expired, and oversized fragments are rejected and cleaned.
-35. Payload and entry limits reject explicitly without unbounded memory growth.
-36. One failing subscriber or one failed entry does not crash synchronization processing for unrelated entries.
-37. During initial connection, `PeerInfo`, `PlayerList`, and `AdminList` are released in a safe order; the initial player list is populated and `LocalPlayerIsAdminOrHost()` is correct without waiting for a later refresh.
-38. Initial handshake buffering preserves package cursors, package contents, and the relative `VersionMatch` position for both normal completion and synchronization failure paths.
+40. Compression and fragmentation boundaries round-trip correctly.
+41. Duplicate, missing, inconsistent, expired, and oversized fragments are rejected and cleaned.
+42. Payload and entry limits reject explicitly without unbounded memory growth.
+43. One failing subscriber or one failed entry does not crash synchronization processing for unrelated entries.
+44. During initial connection, `PeerInfo`, `PlayerList`, and `AdminList` are released in a safe order; the initial player list is populated and `LocalPlayerIsAdminOrHost()` is correct without waiting for a later refresh.
+45. Initial handshake buffering preserves package cursors, package contents, and the relative `VersionMatch` position for both normal completion and synchronization failure paths.
+46. Successful server-side version receive logs include the same remote identifier later used in disconnect diagnostics.
+47. Missing handshake, missing protocol field, explicit protocol mismatch, invalid version strings, client-too-old, and server-too-old cases produce distinct unconditional error messages.
+48. Two overlapping client handshakes retain independent per-peer received state and cannot change each other's rejection reason.
+49. A current rejected client receives one bounded structured disconnect report before `ErrorVersion`; report count, field lengths, reason codes, and trailing bytes are validated.
+50. An older client without the report handler still disconnects normally and the server retains the detailed unconditional error log.
+51. A current client preserves the pending report across failed `ZNet.Shutdown`, appends it once on the main menu, and clears it after display.
+52. A new connection generation cannot display a report captured by the previous `ZRpc`.
+53. A successful admission clears pending report, malformed-handshake, and unknown-consumer state.
+54. A report older than the configured lifetime is ignored.
+55. A Jotunn-, ServerSync-, or vanilla-originated `ErrorVersion` without an already-created CCS report does not cause CCS to append a speculative explanation.
+56. Without Jotunn or ServerSync, the vanilla panel displays the CCS explanation and the button moves only by the final missing height.
+57. With ServerSync, both diagnostics remain present and the deferred layout pass does not repeatedly move the button.
+58. With Jotunn, the vanilla panel is hidden by Jotunn, only Jotunn's compatibility window remains, and its failed-connection area includes the CCS text.
+59. With both Jotunn and ServerSync, Jotunn receives the final combined text and no second CCS modal is created.
+60. Protocol 1 peers without the optional CCS package-version string remain compatible and are logged as `not reported`.
+61. Early unreleased 1.0.4 plain-string disconnect reports are accepted by the current client fallback.
+62. Malformed report format, excessive reason count, an oversized total package, and trailing data produce a bounded generic client explanation and an unconditional client error log; individually overlong display fields are normalized and truncated within the accepted package.
 
 ### Compatibility
 
-39. Load an unchanged test consumer DLL compiled against the first public 1.x CCS API with the new core DLL; do not rebuild the consumer.
-40. Compare the new public API against the retained 1.x baseline and investigate every removal or signature change.
-41. Test a compatible older CCS client/server format whenever validation or package entry handling changes.
+63. Load an unchanged test consumer DLL compiled against the first public 1.x CCS API with the new core DLL; do not rebuild the consumer.
+64. Compare the new public API against the retained 1.x baseline and investigate every removal or signature change.
+65. Test a compatible older CCS client/server format whenever validation or package entry handling changes.
 
 ## Compatibility verification requirement
 
@@ -665,6 +1050,10 @@ A dependent mod should declare the minimum CCS package version that provides the
 12. Scan repository text for accidental Cyrillic outside intentional localization resources.
 13. Remove stale PDB/MDB files and stale binaries from package staging before creating release archives.
 14. Test installation on a clean client and dedicated server profile.
+15. Test CCS rejection UI with neither compatibility library, ServerSync only, Jotunn only, and both installed.
+16. Confirm a rejected current client sees the structured report, while an older or missing CCS client still receives the vanilla version failure without destabilizing the connection flow.
+17. Confirm a failed `ZNet` shutdown preserves the pending report and a successful connection or new attempt clears it.
+18. Rebuild the project archive only after `PROJECT_CONTEXT.md` has been updated to match the final source.
 
 ## Source layout and responsibilities
 
@@ -687,9 +1076,10 @@ A dependent mod should declare the minimum CCS package version that provides the
 - `ConfigurationManagerAttributes.cs`: UI interoperability tags.
 - `GameReflection.cs`: validated runtime binding layer for non-public/publicized Valheim differences.
 - `RuntimeGuard.cs`: standalone assembly enforcement and Harmony identity.
-- `VersionCheck.cs`: peer admission and mod/protocol compatibility.
+- `VersionCheck.cs`: peer admission, per-peer version/protocol diagnostics, structured disconnect reports, pending client-reason lifecycle, Jotunn/ServerSync-aware error-text injection, and vanilla-panel layout normalization.
 - `SynchronizationEvents.cs`: public lifecycle/policy/rejection event arguments.
-- `PluginInfo.cs`: shared package/plugin/protocol metadata.
+- `PluginInfoCCS.cs`: canonical package, plugin, repository, and protocol metadata.
+- `PluginSelfInfo.cs`: retained compatibility metadata alias; do not remove while existing consumers may reference it.
 
 ### `Parts`
 
@@ -711,6 +1101,9 @@ Keep responsibilities separated. Do not grow one giant synchronization class fil
 
 ## Historical decisions that must not be accidentally reversed
 
+- An optional consumer absent from the connected server is a local-only owner after successful admission, not a permanently read-only replica. Preserve the `InitialSyncDone` fail-closed gate for real remote synchronization and resolve absence through the explicit source-of-truth transition.
+- Configuration Manager administrator-sensitive behavior should use CCS effective administrator state when it is operating on CCS-synchronized data; do not reintroduce a direct vanilla `LocalPlayerIsAdminOrHost()` dependency for its hidden-settings filter.
+
 - CCS is a standalone hard dependency, not an embedded helper.
 - `ConfigSync` compatibility is source-oriented, not a claim of binary ServerSync replacement.
 - The numeric wire protocol is independent from package version and uses exact matching.
@@ -728,6 +1121,9 @@ Keep responsibilities separated. Do not grow one giant synchronization class fil
 - Fragment and payload limits are explicit and bounded.
 - Source code remains C# 11 with conventional explicit syntax.
 - Core `AssemblyVersion` remains stable for compatible 1.x releases.
+- CCS owns its rejection reason but appends to the existing connection-error text instead of owning a competing modal window.
+- Jotunn's compatibility window and ServerSync's appended diagnostics must remain independently functional.
+- Pending player-visible rejection data is connection-generation-bound, bounded, short-lived, and preserved across failed shutdown only long enough for display.
 - All repository content is English.
 
 ## How to approach a future bug report
@@ -741,6 +1137,10 @@ Keep responsibilities separated. Do not grow one giant synchronization class fil
 7. Inspect whether the server built a canonical package or forwarded client bytes.
 8. Confirm local fallback persistence and disconnect restoration after any fix.
 9. Add the exact scenario to the regression matrix and update this document if the fix establishes a new invariant.
+10. For admission failures, correlate the server and client logs by the CCS disconnect report ID when both sides use 1.0.4 or newer.
+11. For a missing handshake, record the remote Steam ID/endpoint and compare repeated attempts by that identifier before calling the issue intermittent.
+12. Request the rejected client's startup log from `Chainloader started` through `Chainloader startup complete`, including all `ConditionalConfigSync`, dependent-mod, `Exception`, and `Error` lines.
+13. Do not claim that a missing consumer handshake proves the mod is absent; distinguish missing/disabled, pre-CCS build, CCS load failure, and duplicate/outdated DLL possibilities until the client startup log resolves them.
 
 ## Current security-hardening rationale
 

@@ -190,8 +190,8 @@ internal static class GameReflection
     internal static List<string> GetSyncedListValues(SyncedList list)
         => SyncedListGetListMethod == null ? new List<string>() : new List<string>((IEnumerable<string>)Invoke(SyncedListGetListMethod, list)!);
 
-    internal static Coroutine? StartCoroutine(IEnumerator routine, ZNet? znet = null)
-        => (Coroutine?)Invoke(MonoBehaviourStartCoroutineMethod, znet ?? ZNetInstance, routine);
+    internal static Coroutine? StartCoroutine(IEnumerator routine, MonoBehaviour? owner = null)
+        => (Coroutine?)Invoke(MonoBehaviourStartCoroutineMethod, owner ?? ZNetInstance, routine);
 
     internal static ZNetPeer? GetRoutedPeer(long uid)
     {

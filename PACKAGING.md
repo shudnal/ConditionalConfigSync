@@ -2,6 +2,8 @@
 
 Build the `ConditionalConfigSync.Plugin` project. The imported `Thunderstore.targets` file uses the version embedded in the compiled plugin assembly as the package version.
 
+`ConditionalConfigSync.Plugin.csproj` explicitly removes `Thunderstore.targets` from the SDK default `None` item list before importing it. Keep that removal in place. Without it, Visual Studio CPS can try to represent the same physical file both as a normal project item and as a `ProjectImport`, put the project into `LimitedFunctionality`, and log a project-tree exception even though MSBuild compilation and packaging still work.
+
 The build will automatically:
 
 1. read the actual assembly version from `ConditionalConfigSync.Plugin.dll`;
@@ -30,10 +32,10 @@ Package generation can be disabled for a particular build with:
 Release metadata is defined in one place:
 
 ```text
-ConditionalConfigSync/PluginInfo.cs
+ConditionalConfigSync/PluginInfoCCS.cs
 ```
 
-Update `PluginInfo.PluginVersion` for a new release. `PluginInfo.PluginName` and `PluginInfo.PluginGuid` are the shared display name and BepInEx/Harmony identifier. The BepInEx plugin and file/informational assembly versions use this package version. The core `ConditionalConfigSync.dll` intentionally keeps `AssemblyVersion` at `1.0.0.0` throughout compatible 1.x releases, while the bootstrap assembly follows the package version. The packaging target reads the compiled plugin DLL version and writes it to `manifest.json`.
+Update `PluginInfoCCS.PluginVersion` for a new release. `PluginInfoCCS.PluginName` and `PluginInfoCCS.PluginGuid` are the shared display name and BepInEx/Harmony identifier. The BepInEx plugin and file/informational assembly versions use this package version. The core `ConditionalConfigSync.dll` intentionally keeps `AssemblyVersion` at `1.0.0.0` throughout compatible 1.x releases, while the bootstrap assembly follows the package version. The packaging target reads the compiled plugin DLL version and writes it to `manifest.json`.
 
 After a successful package build, `CopyDLLPlugins` also copies both runtime assemblies to the active local r2modman profile:
 
@@ -61,3 +63,4 @@ The build stages files that are not specific to Thunderstore in `ConditionalConf
 The build copies both license files to GitHub release staging. It does not add or remove them in the Thunderstore staging directory, so manually maintained Thunderstore contents are left intact.
 
 Repository: <https://github.com/shudnal/ConditionalConfigSync>
+

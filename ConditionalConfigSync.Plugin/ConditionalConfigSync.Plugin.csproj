@@ -33,5 +33,13 @@
           SkipUnchangedFiles="true" />
   </Target>
 
-  <Import Project="Thunderstore.targets" />
+  <!-- Thunderstore.targets is an MSBuild import, not a regular project item.
+       Removing it from the SDK default None glob prevents Visual Studio CPS from
+       trying to represent the same file as both ProjectImport and FileOnDisk. -->
+  <ItemGroup>
+    <None Remove="Thunderstore.targets" />
+  </ItemGroup>
+
+  <Import Project="$(MSBuildProjectDirectory)\Thunderstore.targets"
+          Condition="Exists('$(MSBuildProjectDirectory)\Thunderstore.targets')" />
 </Project>

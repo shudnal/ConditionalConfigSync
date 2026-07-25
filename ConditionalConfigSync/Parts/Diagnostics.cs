@@ -590,4 +590,9 @@ public partial class ConditionalConfigSync
     {
         LogSource.LogWarning($"[{modName}][{GetDebugSide()}][{area}] {message}");
     }
+
+    internal static void VersionErrorLog(string area, string modName, string message)
+    {
+        LogSource.LogError($"[{modName}][{GetDebugSide()}][{area}] {message}");
+    }
 }

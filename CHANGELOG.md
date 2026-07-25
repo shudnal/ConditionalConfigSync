@@ -1,3 +1,19 @@
+# 1.0.4
+* fixed a Visual Studio CPS `LimitedFunctionality` project-tree error by removing the imported `Thunderstore.targets` file from the SDK default `None` item list while keeping it as an explicit MSBuild import
+* fixed the 1.0.4 source build against the existing Unity reference set by removing an unnecessary `Canvas.ForceUpdateCanvases()` call from connection-error layout normalization
+* fixed optional client-side CCS consumers remaining in a fail-closed replica state when the connected server does not provide that mod; after successful `PeerInfo`, the instance now returns to local config ownership without raising `InitialSyncCompleted`
+* classified version-check failures as a missing handshake, missing protocol metadata, protocol mismatch, invalid version data, or a specific mod-version range mismatch
+* changed connection-rejection diagnostics to unconditional error logs so disconnect causes are recorded even when debug logging is disabled
+* added the remote client identifier, reported Conditional Config Sync package version, protocol, and handshake timing to version-check logs
+* kept received version-handshake state per peer so simultaneous connections cannot overwrite the diagnostics used for another client
+* added an optional trailing Conditional Config Sync package version to the compatible protocol 1 handshake without changing the wire protocol version
+* sends one bounded structured English disconnect report with a report ID and explicit reason codes before the vanilla version error
+* associates pending disconnect reports with one client connection attempt, preserves them across the failed `ZNet` shutdown, and clears them after success, display, a new attempt, or timeout
+* appends CCS diagnostics to the existing Valheim error text before Jotunn and ServerSync process it, preserving Jotunn's separate compatibility window
+* only augments the connection error when an explicit report belongs to the current CCS rejection, avoiding speculative CCS text for unrelated `ErrorVersion` failures
+* normalizes the vanilla connection-error layout one frame later without repeatedly moving the confirmation button
+* records malformed version-handshake packages and improves reporting when a required remote mod did not process the shared version RPC
+
 # 1.0.3
 * fixed initial handshake buffering so vanilla `PlayerList` and `AdminList` are delivered after `PeerInfo`, preserving `LocalPlayerIsAdminOrHost()` and the initial player list
 
