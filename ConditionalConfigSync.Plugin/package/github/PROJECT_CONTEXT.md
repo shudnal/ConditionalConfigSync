@@ -4,7 +4,7 @@ This document is the durable engineering context for Conditional Config Sync (CC
 
 Read this file before making architectural, networking, compatibility, policy, lifecycle, or packaging changes. Read the current source code as the final authority when implementation details have evolved, and update this document whenever a project decision changes.
 
-## Current handoff snapshot — 2026-07-23
+## Current handoff snapshot — 2026-08-20
 
 This section is the shortest path for starting a new chat or resuming work after context loss. It records the exact accepted baseline, the current unreleased release state, the incident that motivated the latest work, and the non-negotiable implementation decisions. The remainder of this document contains the deeper architecture and historical rationale.
 
@@ -28,20 +28,153 @@ The corrected 1.0.3 project was produced by applying only the initial-handshake 
 - restore the inspected `ZPackage` cursor before buffering or forwarding;
 - retain protocol version 1 and core assembly identity `1.0.0.0`.
 
-The current 1.0.4 work starts from the corrected 1.0.3 state plus the version-diagnostics work in `ConditionalConfigSync_1.0.4_VersionDiagnostics_20260722_1217.zip`. Version 1.0.4 is still unreleased in this handoff. The latest source tree must retain every API and transport change from the accepted reference and 1.0.3.
+The current 1.0.4 work starts from the corrected 1.0.3 state plus the version-diagnostics work in `ConditionalConfigSync_1.0.4_VersionDiagnostics_20260722_1217.zip`. Version 1.0.4 is still unreleased in that historical handoff. The latest source tree must retain every API and transport change from the accepted reference and 1.0.3.
+
+For the 1.0.5 work started on 2026-08-20, the authoritative baseline is the owner-supplied `ConditionalConfigSync.zip` from this chat, SHA-256 `7f06152b4e8a412bb0ddeb91c4160629d9733b126f00ceb08bffa38a7b92e3a5`. That archive already contains the accepted 1.0.4 connection diagnostics, optional-server ownership fix, disconnect-reason UI integration, Visual Studio project-tree fix, packaging metadata, and the full durable project context. Do not reconstruct 1.0.5 from one of the older generated archives when this baseline is available.
 
 ### Current release identity
 
-- Package version: `1.0.4`
+- Package version: `1.0.5`
 - CCS wire protocol: `1`
 - Disconnect-report subformat: `1`
 - Core `AssemblyVersion`: `1.0.0.0`
-- Core and plugin file/informational version: `1.0.4`
+- Core and plugin file/informational version: `1.0.5`
 - BepInEx GUID and Harmony owner: `_shudnal.ConditionalConfigSync`
 - Jotunn Harmony owner used only for patch ordering: `com.jotunn.jotunn`
 - ServerSync Harmony owner used only for patch ordering: `org.bepinex.helpers.ServerSync`
 
 The additional package-version string in the ordinary version handshake is an optional trailing protocol-1 field. It does not justify a CCS protocol bump. The disconnect report is a separate best-effort RPC with its own internal format version and likewise does not change the main protocol.
+
+### 1.0.5 full-sync snapshot cache and serialization diagnostics
+
+The 2026-08-20 optimization request came from a ServerSync migration case where a consumer mod concatenated large YAML files into one synchronized string. The important distinction is that the inefficiency is not merely "strings instead of bytes": every network payload is bytes on the wire. The costly pattern is sending source representation to the client, which causes large text allocation plus repeated client-side parsing instead of synchronizing already parsed runtime state. CCS must not parse application YAML itself because it does not know the consumer schema, but it can avoid repeating its own serialization/compression work and can make large payloads observable.
+
+The owner explicitly requested that 1.0.5 keep both the public API and the main wire protocol unchanged. Therefore this release contains only internal transport/serialization optimization and diagnostics. `PluginInfoCCS.ProtocolVersion` remains `1`; `AssemblyVersion` of the core library remains `1.0.0.0`; no new public codec/blob API and no new wire entry kind is introduced.
+
+#### Full server snapshot cache
+
+Complete server packages are now cached as immutable wire bytes after serialization and, when the existing compression threshold is exceeded, after Deflate compression. The cache is per `ConditionalConfigSync` instance and keyed by:
+
+- monotonically increasing authoritative state revision;
+- administrator versus non-administrator recipient class, because the full package contains peer-specific `LockExempt` state;
+- current server mod version;
+- registered config count;
+- registered custom-value count.
+
+Only two complete snapshots can be retained for one state revision: one administrator variant and one non-administrator variant. The bytes cached are the final package passed into fragmentation/distribution, so cache hits skip both `ConfigsToPackage(...)` and `CompressPackage(...)`. A new `ZPackage` wrapper is created from the immutable cached byte array for each send; the cached array itself is not mutated.
+
+The same cache is used by all paths that require a full authoritative package:
+
+- initial sync during peer admission;
+- explicit or automatic complete resync;
+- rate-limited full authoritative correction after a rejected/invalid client update.
+
+Partial/config/custom-value broadcasts remain uncached because their contents represent individual state transitions.
+
+The pre-compression 20 MiB safety limit is unchanged. A snapshot whose raw serialized size exceeds that limit is not made acceptable merely because it might compress well. Likewise, an invalid oversized snapshot is not retained in the cache, and CCS does not make an additional cached-byte copy of a snapshot that will be rejected. This preserves the existing memory-safety contract and avoids amplifying allocations on an already oversized payload.
+
+The snapshot revision/cache is invalidated when CCS can observe any authoritative state change that affects a future full package:
+
+- a registered server-controlled BepInEx config value whose value is present in a full package changes on the server; client-owned/local-only value changes do not unnecessarily discard an otherwise identical full snapshot;
+- a custom synchronized value changes or is explicitly notified on the server;
+- an accepted client update changes canonical server state;
+- effective synchronization/hidden policy state changes;
+- a config entry is registered during an active server session;
+- a custom value is registered during an active server session;
+- the network session resets.
+
+`CurrentVersion` is also compared directly when looking up a cached snapshot, so changing version metadata cannot reuse an older full package even though it is a public compatibility field rather than an observable property setter. Registered counts are compared as an additional safety check. Public compatibility fields such as `OwnConfigEntryBase.SyncMode` and `SynchronizedConfig` are still intended to be configured during registration; runtime changes should continue to use supported policy/config pathways so invalidation and broadcast semantics remain coherent. Likewise, mutable custom-value objects, collections, arrays, and other reference types must call `NotifyChanged()` after in-place mutation. That call was already required for correct network publication and now also advances the full-snapshot revision. Code that silently mutates a custom object and relied on a later full resync noticing the changed object graph was already outside the documented synchronization contract and can now receive a cached earlier snapshot.
+
+Administrator-list changes do not invalidate the cache because admin and non-admin variants are already separate. The current peer classification is evaluated each time a full snapshot is selected.
+
+#### Serialization and compression diagnostics
+
+Diagnostics were added without changing package bytes. The instrumentation is deliberately gated so normal operation does not pay reflection/package-size measurement costs merely for logging.
+
+At `Verbose` level CCS logs:
+
+- partial/full package serialization counts;
+- raw serialized package size;
+- package serialization elapsed time;
+- compression elapsed time for ordinary outgoing packages;
+- raw and compressed/wire sizes;
+- compression ratio and percentage saved;
+- full-snapshot revision, administrator class, build versus reuse state, and the build serialization/compression times.
+
+Representative log shapes:
+
+```text
+[Some Mod][Server][Serialization] Serialized full package: configs=12, states=18, custom=3, metadata=2, raw=4.80 MiB (5033165 bytes), time=41.20 ms
+[Some Mod][Server][Snapshot] Built full-sync snapshot: revision=17, admin=False, configs=18, custom=3, raw=4.80 MiB (...), compressed=612.0 KiB (...), ratio=12.5%, saved=87.5%, serialize=41.34 ms, compress=73.11 ms
+[Some Mod][Server][Snapshot] Reusing full-sync snapshot: revision=17, admin=False, raw=4.80 MiB (...), wire=612.0 KiB (...), compressed=True, buildSerialize=41.34 ms, buildCompress=73.11 ms
+```
+
+At `Trace` level CCS additionally logs each serialized config/custom payload independently, including its identifier/type and payload byte count. This is the preferred mode for identifying which custom value dominates a large synchronization package. It is especially useful for the owner's planned texture/blob test mod.
+
+`AddEntryToPackage` reuses the payload byte array it already has to write into the parent package when reporting per-entry size. It does not add an extra `PackageSize` reflection call for every entry. Package Stopwatch timing is enabled only when the corresponding `Verbose` diagnostics are active. This keeps the optimization from creating a new always-on profiling cost.
+
+A large outgoing `CustomSyncedValue<string>` at or above 128 KiB emits one warning per identifier per synchronization instance per network session even when debug logging is disabled. The warning is advisory only: the value is still sent normally. Its purpose is to highlight source-text synchronization where parsed structured/binary runtime data could reduce repeated allocation and parsing. The warning set is reset with network-session state.
+
+#### Important non-goals for 1.0.5
+
+Do not add any of the following as part of this release unless the owner explicitly starts a separate protocol/API task:
+
+- automatic YAML/JSON parsing in CCS;
+- textual delta/patch generation for large strings;
+- a new public `ISyncCodec<T>`/blob API;
+- a different wire representation for `byte[]` or collections;
+- schema-aware collection encoding that removes repeated type metadata;
+- protocol revision negotiation or content-hash/chunk caches;
+- a change from Deflate purely for this optimization.
+
+Those can be considered after real measurements. 1.0.5 is intended to provide those measurements while improving the server-side repeated-connect/resync cost immediately.
+
+#### 1.0.5 regression checklist
+
+In addition to the global regression list later in this document, verify these cases when a runnable Valheim environment is available:
+
+1. Start a server with one sync instance containing a large custom value; enable `Verbose`; first non-admin connection logs `snapshot=built`, a later non-admin connection with unchanged state logs `snapshot=reused`.
+2. Connect an administrator after the non-admin snapshot exists; an admin snapshot is built once and then reused for later admins.
+3. Change one synchronized config; both admin/non-admin snapshot variants are invalidated and the next full sync builds a new revision.
+4. Change/notify one custom value; next full sync builds a new revision.
+5. Reload policy so effective ownership or hidden state changes; next full sync builds a new revision.
+6. Accept an authorized client update on the server; next full sync reflects the canonical updated value and does not reuse the old revision.
+7. Register a late config/custom value; partial late-registration broadcast still occurs and subsequent full resync includes it in a new snapshot revision.
+8. Issue a complete resync twice without changing state; the second request reuses the relevant snapshot.
+9. Trigger a full authoritative correction after a rejected client update; it uses the same snapshot cache.
+10. Enable `Trace` with a mod-name filter; verify individual config/custom payload sizes and ensure large byte/blob data is identifiable.
+11. Send a `CustomSyncedValue<string>` whose serialized payload is at least 128 KiB; verify exactly one advisory warning per session for that identifier even with debug disabled.
+12. Verify a string below the threshold produces no warning.
+13. Verify ordinary partial packages still use the existing compression path and `Verbose` reports raw/compressed ratio and compression time.
+14. Verify raw payloads above 20 MiB are still rejected before compression and are not retained as reusable snapshots.
+15. Verify client/server 1.0.5 interoperates with protocol-1 1.0.4 peers wherever the existing optional handshake metadata rules allow it; no main protocol mismatch should be introduced by this release.
+16. Compare package bytes produced from the same state with 1.0.4 to ensure no serialization-format change was introduced by the diagnostics/cache refactor.
+17. Change a client-owned/local-only registered config on the server and verify an otherwise identical full snapshot is not discarded; change a server-controlled synchronized config and verify the revision advances.
+18. Build an oversized full package and verify it is rejected under the existing limits without retaining the snapshot or creating an additional cached wire-byte copy.
+
+#### 1.0.5 implementation and validation handoff
+
+Files intentionally changed in the core implementation for 1.0.5:
+
+- `ConditionalConfigSync.cs`: invalidate the reusable full snapshot when configs/custom values are registered during an active authoritative session;
+- `Parts/Diagnostics.cs`: internal byte-size, elapsed-time, and compression-ratio formatting helpers;
+- `Parts/Packages.cs`: gated serialization timing, per-entry payload diagnostics, and the large-string advisory;
+- `Parts/Stabilization.cs`: full-snapshot revision/cache, admin/non-admin variants, cache-aware initial/resync/correction sending, and session cleanup;
+- `Parts/Transport.cs`: snapshot invalidation on observable authoritative value changes, prepared-package sending, and compression timing;
+- `Parts/Policy.cs`: snapshot invalidation when effective ownership/hidden policy state changes;
+- `PluginInfoCCS.cs` and `PluginSelfInfo.cs`: package version `1.0.5`, protocol still `1`.
+
+The public declaration shape of the core source was compared to the supplied 1.0.4 baseline after normalizing the package-version literal; no public declaration was added, removed, or signature-changed by this work. `VersionCheck.cs`, `Parts/PolicyControl.cs`, `SyncedConfigEntry.cs`, `ConfigSyncPolicyControlState.cs`, and `RuntimeGuard.cs` were verified unchanged from the supplied baseline. Root and staged README/CHANGELOG/PROJECT_CONTEXT copies were synchronized, project XML and manifest JSON parsed successfully, a lexical C# delimiter/string/comment balance check passed, and repository text outside binaries contained no Cyrillic.
+
+This execution environment does not provide `dotnet`, `msbuild`, `csc`, `mcs`, or the normal Valheim/BepInEx build reference tree, so 1.0.5 was not compiled or runtime-tested here. The deliverable produced from this environment must therefore be treated as a source project. Stale 1.0.4 `bin`/`obj`, staged DLL/XML/checksum artifacts, and the old generated package ZIP from the supplied reference must be removed from that source archive rather than represented as 1.0.5 binaries. The owner will compile and profile the result in the normal Visual Studio/Valheim environment.
+
+##### 1.0.5 compilation follow-up: `FullSyncSnapshot` field accessibility
+
+The owner's Visual Studio build of the first 1.0.5 source handoff reported protection-level errors for `ConditionalConfigSync.FullSyncSnapshot.Revision` and the other fields of the nested snapshot container. The generated implementation declared those fields `private` but accessed them from the surrounding `ConditionalConfigSync` implementation. This was a source-level compile defect in the unreleased 1.0.5 handoff, not a protocol or runtime design issue.
+
+The fix is intentionally narrow: every data field of the still-`private sealed` `FullSyncSnapshot` type is now `internal`. The snapshot type itself remains private to `ConditionalConfigSync`, so this does **not** add any public API surface, does not change the package format, and does not change protocol `1`. Do not add a CHANGELOG entry for this intermediate compile repair because 1.0.5 has not been released and the owner requires changelogs to contain only user-visible release changes and meaningful performance improvements.
+
+Regression requirement: compile both core and plugin projects in Visual Studio before profiling the 1.0.5 snapshot cache. In particular, verify all accesses to `Revision`, `Admin`, `ServerVersion`, `ConfigCount`, `CustomValueCount`, `RawSize`, `WireSize`, `Compressed`, `SerializationMilliseconds`, `CompressionMilliseconds`, and `WireBytes` compile without accessibility errors.
 
 ### Visual Studio CPS project-tree compatibility
 

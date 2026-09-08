@@ -342,6 +342,7 @@ public partial class ConditionalConfigSync
 
         configEntry.SettingChanged += (_, _) => OnConfigEntryChanged(configEntry, syncedEntry);
         allConfigs.Add(syncedEntry);
+        InvalidateFullSyncSnapshot($"registered config: {definition.Section} -> {definition.Key}");
 
         bool applyLoadedPolicy = IsSourceOfTruth && isServer && GameReflection.HasZNet && policySupportInitialized;
         syncedEntry.IsServerControlled = applyLoadedPolicy ? ComputeServerControlled(syncedEntry) : GetDefaultServerControlled(syncedEntry);
@@ -492,6 +493,7 @@ public partial class ConditionalConfigSync
 
         allCustomValues.Add(customValue);
         allCustomValues = new HashSet<CustomSyncedValueBase>(allCustomValues.OrderByDescending(v => v.Priority).ThenBy(v => v.RegistrationIndex));
+        InvalidateFullSyncSnapshot($"registered custom value: {customValue.Identifier}");
         customValue.ValueChanged += () => OnCustomValueChanged(customValue);
         DebugLog(ConditionalConfigSyncDebugLevel.Trace, "Register", $"Added custom value {customValue.Identifier}, type={customValue.Type.Name}, priority={customValue.Priority}, sequenced={customValue.PreserveUpdateSequence}");
         ScheduleLateRegistrationSync(customValue: customValue);

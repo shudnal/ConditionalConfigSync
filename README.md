@@ -183,6 +183,10 @@ conditionalconfigsync_policy_dump
 
 Debug logging supports `Basic`, `Verbose`, and `Trace` levels and an optional mod-name filter. Normal startup stays quiet; warnings and errors remain visible without debug logging.
 
+For synchronization performance analysis, `Verbose` logs package serialization time, compression time, raw and wire sizes, compression ratio, and whether a complete server snapshot was built or reused. `Trace` additionally logs the serialized payload size of every config value and custom value. This is intended for short profiling sessions with a mod-name filter when large custom data such as generated definitions, images, or other blobs is synchronized.
+
+A `CustomSyncedValue<string>` whose serialized payload reaches 128 KiB produces one warning per synchronization instance per network session even when debug logging is disabled. The warning does not reject or alter the value; it highlights cases where sending already parsed structured or binary runtime data may avoid repeated large-string allocation and client-side text parsing.
+
 ### Connection rejection diagnostics
 
 Version-check disconnects are always written as errors, independently of the debug logging configuration. Server logs distinguish these cases:
@@ -430,6 +434,7 @@ For Thunderstore, add this package to the mod's dependencies. Do not copy either
 - Supports explicit `AssignLocalValue`, `AssignLocalValueIfChanged`, and `AssignLocalValueAndNotify` behavior.
 - Supports custom equality comparers for collections and domain types.
 - Supports priorities and preserves ordering for sequenced values.
+- Mods that mutate a custom value object, collection, array, or other reference in place must call `NotifyChanged()` after the mutation. This was already required to publish the change and now also invalidates the reusable full-sync snapshot.
 - Defers outgoing updates safely instead of dropping changes during active synchronization.
 
 ### Serialization and networking
@@ -440,6 +445,9 @@ For Thunderstore, add this package to the mod's dependencies. Do not copy either
 - Keeps legacy client `ConfigState` claims wire-compatible only when they match server policy, while never trusting or forwarding them.
 - Builds a new canonical server package after accepted client updates and includes the initiating client in the result.
 - Adds compression, fragmentation, queue limits, payload limits, and clearer failure logging.
+- Caches complete server synchronization snapshots by authoritative state revision and administrator class, including already compressed wire data, so later clients do not repeatedly serialize and compress unchanged state.
+- Invalidates those snapshots when synchronized config/custom values, effective policy state, accepted client updates, or registrations change; complete resyncs and full authoritative corrections use the same cache.
+- Adds optional package timing/size diagnostics without changing serialization bytes when diagnostics are disabled.
 - Adds an independent numeric protocol version with exact client/server matching.
 - Supports automatic late registration and explicit complete resynchronization.
 
