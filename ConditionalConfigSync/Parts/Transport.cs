@@ -13,13 +13,11 @@ namespace ConditionalConfigSync;
 
 public partial class ConditionalConfigSync
 {
-    private short sendCount;
-
-    private short processingCount;
+    private int processingCount;
 
     private bool lastHandledPackageWasFull;
 
-    private bool IsSending => sendCount > 0;
+    private bool IsSending => sendQueue.Count > 0;
 
     private bool IsProcessing => processingCount > 0;
 
@@ -28,7 +26,12 @@ public partial class ConditionalConfigSync
 
     private readonly HashSet<CustomSyncedValueBase> pendingCustomValueBroadcasts = new();
 
-    private readonly System.Collections.Generic.Queue<ZPackage> pendingSequencedCustomValuePackages = new();
+    private sealed class PendingSequencedPackage
+    {
+        internal ZPackage? Package;
+    }
+
+    private readonly LinkedList<PendingSequencedPackage> pendingSequencedCustomValuePackages = new();
 
     private bool flushingPendingBroadcasts;
 
@@ -47,7 +50,7 @@ public partial class ConditionalConfigSync
 
     private bool CanBroadcastFromThisSide()
     {
-        if (!GameReflection.HasZNet)
+        if (!sessionActive || !GameReflection.HasZNet)
         {
             return false;
         }
@@ -61,7 +64,8 @@ public partial class ConditionalConfigSync
                && (IsAdmin || !ServerLockEnabled && AllowClientConfigUpdatesWhenUnlocked);
     }
 
-    private bool ShouldDeferOutgoingBroadcasts => ProcessingServerUpdate || IsProcessing || IsSending || flushingPendingBroadcasts;
+    private bool ShouldDeferOutgoingBroadcasts => ProcessingServerUpdate || packagePreparationDepth > 0
+        || IsProcessing || IsSending || flushingPendingBroadcasts;
 
     private void OnConfigEntryChanged(ConfigEntryBase configEntry, OwnConfigEntryBase syncedEntry)
     {
@@ -101,7 +105,7 @@ public partial class ConditionalConfigSync
         DebugLog(ConditionalConfigSyncDebugLevel.Verbose, "ConfigChanged", $"Broadcast {configEntry.Definition.Section}/{configEntry.Definition.Key}");
         StartBroadcastPackage(
             GameReflection.Everybody,
-            ConfigsToPackage(configs: new[] { configEntry }, includeConfigStates: isServer));
+            () => ConfigsToPackage(configs: new[] { configEntry }, includeConfigStates: isServer));
     }
 
     private void OnCustomValueChanged(CustomSyncedValueBase customValue)
@@ -151,10 +155,11 @@ public partial class ConditionalConfigSync
         {
             if (customValue.PreserveUpdateSequence)
             {
-                if (TryEnqueueSequencedPackage(ConfigsToPackage(customValues: new[] { customValue }), customValue.Identifier))
+                if (TryEnqueueSequencedPackage(() => ConfigsToPackage(customValues: new[] { customValue }), customValue.Identifier))
                 {
                     DebugLog(ConditionalConfigSyncDebugLevel.Verbose, "CustomValue", $"Queued sequenced {customValue.Identifier}, priority={customValue.Priority}");
                 }
+                FlushPendingBroadcastsForAllIfIdle();
             }
             else
             {
@@ -165,12 +170,16 @@ public partial class ConditionalConfigSync
         }
 
         DebugLog(ConditionalConfigSyncDebugLevel.Verbose, "CustomValue", $"Broadcast {customValue.Identifier}, priority={customValue.Priority}");
-        StartBroadcastPackage(GameReflection.Everybody, ConfigsToPackage(customValues: new[] { customValue }));
+        StartBroadcastPackage(GameReflection.Everybody, () => ConfigsToPackage(customValues: new[] { customValue }), customValue.PreserveUpdateSequence);
     }
 
     internal static class ZNetUpdatePatch
     {
-        internal static void Postfix() => DrainMainThreadQueue();
+        internal static void Postfix()
+        {
+            DrainMainThreadQueue();
+            FlushPendingBroadcastsForAllIfIdle();
+        }
     }
 
     internal static class ZNetAwakePatch
@@ -185,7 +194,7 @@ public partial class ConditionalConfigSync
                 // Policy files are server-side only. Clients receive the effective state in sync packages.
                 EnsurePolicySupportInitialized(createIfMissing: true);
             }
-            foreach (ConditionalConfigSync configSync in configSyncs)
+            foreach (ConditionalConfigSync configSync in configSyncs.ToArray())
             {
                 configSync.RegisterForActiveSession();
             }
@@ -197,26 +206,31 @@ public partial class ConditionalConfigSync
                 for (; ; )
                 {
                     yield return new WaitForSeconds(30);
+                    if (!sessionActive || !ReferenceEquals(GameReflection.ZNetInstance, __instance))
+                    {
+                        yield break;
+                    }
                     if (!GameReflection.GetSyncedListValues(adminList).SequenceEqual(currentList))
                     {
                         currentList = GameReflection.GetSyncedListValues(adminList);
 
                         void SendAdmin(List<ZNetPeer> peers, bool isAdmin)
                         {
-                            if (configSyncs.FirstOrDefault() is { } configSync)
+                            // An optional first consumer may not exist on this client. Every registered
+                            // consumer carries the same process-wide exemption through its own RPC.
+                            foreach (ConditionalConfigSync configSync in configSyncs.ToArray())
                             {
-                                ZPackage package = configSync.ConfigsToPackage(packageEntries: new[]
+                                configSync.StartBroadcastPackage(peers, () => configSync.ConfigsToPackage(packageEntries: new[]
                                 {
                                     PackageEntry.LockExempt(isAdmin),
-                                });
-                                GameReflection.StartCoroutine(configSync.SendZPackage(peers, package), __instance);
+                                }));
                             }
                         }
 
                         List<ZNetPeer> peers = GameReflection.GetPeers(__instance);
                         List<ZNetPeer> adminPeer = peers.Where(IsPeerAdmin).ToList();
                         List<ZNetPeer> nonAdminPeer = peers.Except(adminPeer).ToList();
-                        foreach (ConditionalConfigSync sync in configSyncs)
+                        foreach (ConditionalConfigSync sync in configSyncs.ToArray())
                         {
                             sync.DebugLog(ConditionalConfigSyncDebugLevel.Basic, "Admin", $"Admin list changed, admins={adminPeer.Count}, nonAdmins={nonAdminPeer.Count}");
                         }
@@ -239,7 +253,7 @@ public partial class ConditionalConfigSync
         {
             if (!GameReflection.IsServer(__instance))
             {
-                foreach (ConditionalConfigSync configSync in configSyncs)
+                foreach (ConditionalConfigSync configSync in configSyncs.ToArray())
                 {
                     configSync.RegisterClientRpcHandler(peer);
                 }
@@ -349,23 +363,49 @@ public partial class ConditionalConfigSync
 
     private int GetFragmentCacheBytesGlobal() => configValueCacheBytes.Values.Sum();
 
-    private bool TryEnqueueSequencedPackage(ZPackage package, string identifier)
+    private bool TryEnqueueSequencedPackage(Func<ZPackage> createPackage, string identifier)
     {
-        int size = GameReflection.PackageSize(package);
-        if (size > maxPayloadSize)
-        {
-            RejectSync($"Rejected sequenced custom value '{identifier}': serialized payload is {size} bytes, limit is {maxPayloadSize} bytes.", null, incoming: false);
-            return false;
-        }
-
-        if (pendingSequencedCustomValuePackages.Count >= maxPendingSequencedUpdates)
+        if (pendingSequencedCustomValuePackages.Count + waitingSequencedSendCount >= maxPendingSequencedUpdates)
         {
             RejectSync($"Rejected newest sequenced custom value '{identifier}': pending queue already contains {maxPendingSequencedUpdates} events.", null, incoming: false);
             return false;
         }
 
-        pendingSequencedCustomValuePackages.Enqueue(package);
-        return true;
+        // Reserve before calling a consumer serializer. Reentrant notifications must be placed after
+        // this event, even when their smaller payload finishes serialization first.
+        LinkedListNode<PendingSequencedPackage> node = pendingSequencedCustomValuePackages.AddLast(new PendingSequencedPackage());
+        long generation = transportGeneration;
+        ++packagePreparationDepth;
+        try
+        {
+            ZPackage package = createPackage();
+            int size = GameReflection.PackageSize(package);
+            if (generation != transportGeneration || !sessionActive)
+            {
+                return false;
+            }
+            if (size > maxPayloadSize)
+            {
+                RejectSync($"Rejected sequenced custom value '{identifier}': serialized payload is {size} bytes, limit is {maxPayloadSize} bytes.", null, incoming: false);
+                return false;
+            }
+
+            node.Value.Package = package;
+            return true;
+        }
+        catch (Exception e)
+        {
+            RejectSync($"Failed to serialize sequenced custom value '{identifier}': {e.Message}", null, incoming: false, e);
+            return false;
+        }
+        finally
+        {
+            --packagePreparationDepth;
+            if (node.Value.Package == null && node.List == pendingSequencedCustomValuePackages)
+            {
+                pendingSequencedCustomValuePackages.Remove(node);
+            }
+        }
     }
 
     private bool ValidateOutgoingPayload(ZPackage package, string context)
@@ -380,15 +420,50 @@ public partial class ConditionalConfigSync
         return false;
     }
 
+    private void QueueInitialSyncRepair()
+    {
+        if (InitialSyncDone || initialSyncRepairRequested || !sessionActive || isServer)
+        {
+            return;
+        }
+
+        initialSyncRepairRequested = true;
+        long generation = transportGeneration;
+        QueueMainThread(() =>
+        {
+            if (generation != transportGeneration || !sessionActive || InitialSyncDone)
+            {
+                return;
+            }
+            if (!GameReflection.GetPeers().Any(GameReflection.IsPeerReady))
+            {
+                initialSyncRepairRequested = false;
+                QueueInitialSyncRepair();
+                return;
+            }
+            initialSyncRepairRequested = RequestFullSync();
+        });
+    }
+
     private void RPC_FromServerConfigSync(ZRpc rpc, ZPackage package)
     {
         LockedConfigChanged -= ServerLockedSettingChanged;
         LockedConfigChanged += ServerLockedSettingChanged;
         IsSourceOfTruth = false;
 
-        if (HandleConfigSyncRPC(0, package, false) && lastHandledPackageWasFull)
+        if (HandleConfigSyncRPC(0, package, false))
         {
-            RaiseInitialSyncCompletedIfNeeded();
+            if (lastHandledPackageWasFull)
+            {
+                initialSyncRepairRequested = false;
+                RaiseInitialSyncCompletedIfNeeded();
+            }
+            else if (!InitialSyncDone)
+            {
+                // A provider can appear after an optional consumer completed admission locally.
+                // Its first partial registration update is not a complete initial synchronization.
+                QueueInitialSyncRepair();
+            }
         }
     }
 
@@ -400,7 +475,10 @@ public partial class ConditionalConfigSync
         string? activeFragmentCacheKey = null;
         lastHandledPackageWasFull = false;
         bool processingStarted = false;
+        bool wasProcessingServerUpdate = ProcessingServerUpdate;
+        long generation = transportGeneration;
         ParsedConfigs? parsedClientUpdate = null;
+        SendSlot? canonicalSlot = null;
 
         try
         {
@@ -553,12 +631,11 @@ public partial class ConditionalConfigSync
             packageFlags = GameReflection.PackageReadByte(package);
 
             lastHandledPackageWasFull = (packageFlags & PARTIAL_CONFIGS) == 0;
-            if (lastHandledPackageWasFull && receivedFromServer)
-            {
-                ResetConfigsFromServer();
-            }
-
             ParsedConfigs configs = ReadConfigsFromPackage(package, receivedFromServer, strictClientUpdate: isServer && clientUpdate);
+            if (generation != transportGeneration || !sessionActive)
+            {
+                return false;
+            }
             if (isServer && clientUpdate)
             {
                 parsedClientUpdate = configs;
@@ -567,9 +644,19 @@ public partial class ConditionalConfigSync
                     RejectClientUpdate(sender, senderIsAdmin, rejectionReason, configs);
                     return false;
                 }
+                // Reserve the canonical update before callbacks enqueue derived changes.
+                canonicalSlot = ReserveSendSlot();
+            }
+            if (lastHandledPackageWasFull && receivedFromServer)
+            {
+                ResetConfigsFromServer(configs);
             }
 
             ApplyParsedConfigs(configs, receivedFromServer);
+            if (generation != transportGeneration || !sessionActive)
+            {
+                return false;
+            }
 
             string source = isServer || clientUpdate ? FormatClient(sender) : "the server";
             InfoLog($"Received {configs.configValues.Count} configs and {configs.customValues.Count} custom values from {source}{GetSingleEntryReceiveDetails(configs)}");
@@ -580,14 +667,14 @@ public partial class ConditionalConfigSync
                 LogAcceptedClientUpdate(sender, configs, authorization);
                 InvalidateFullSyncSnapshot($"accepted client update from {FormatClient(sender)}");
 
-                ZPackage canonicalPackage = ConfigsToPackage(
+                StartBroadcastPackage(GameReflection.Everybody, () => ConfigsToPackage(
                     configs.configValues.Keys.Select(config => config.BaseConfig),
                     configs.customValues.Keys,
                     partial: true,
                     includeConfigValues: true,
                     includeAllProvidedConfigStates: true,
-                    includeConfigStates: true);
-                StartBroadcastPackage(GameReflection.Everybody, canonicalPackage);
+                    includeConfigStates: true), reservation: canonicalSlot);
+                canonicalSlot = null;
             }
 
             return true;
@@ -612,14 +699,18 @@ public partial class ConditionalConfigSync
         }
         finally
         {
-            if (processingStarted)
+            if (canonicalSlot != null)
+            {
+                ReleaseSendSlot(canonicalSlot);
+            }
+            if (processingStarted && generation == transportGeneration)
             {
                 if (processingCount > 0)
                 {
                     --processingCount;
                 }
-                ProcessingServerUpdate = false;
-                FlushPendingBroadcastsIfIdle();
+                ProcessingServerUpdate = wasProcessingServerUpdate;
+                FlushPendingBroadcastsForAllIfIdle();
             }
         }
     }
@@ -743,14 +834,13 @@ public partial class ConditionalConfigSync
             return;
         }
 
-        ZPackage correction = ConfigsToPackage(
+        StartBroadcastPackage(new List<ZNetPeer> { peer }, () => ConfigsToPackage(
             configs.configValues.Keys.Select(config => config.BaseConfig),
             configs.customValues.Keys,
             partial: true,
             includeConfigValues: true,
             includeAllProvidedConfigStates: true,
-            includeConfigStates: true);
-        StartBroadcastPackage(new List<ZNetPeer> { peer }, correction);
+            includeConfigStates: true));
     }
 
     internal static class ZNetShutdownPatch
@@ -758,8 +848,13 @@ public partial class ConditionalConfigSync
         internal static void Postfix()
         {
             ConditionalConfigSync[] instances = configSyncs.ToArray();
+            sessionActive = false;
             ProcessingServerUpdate = true;
             lockExempt = false;
+            foreach (ConditionalConfigSync configSync in instances)
+            {
+                configSync.ResetTransportState();
+            }
             try
             {
                 foreach (ConditionalConfigSync serverSync in instances)
@@ -767,16 +862,10 @@ public partial class ConditionalConfigSync
                     try
                     {
                         serverSync.DebugLog(ConditionalConfigSyncDebugLevel.Basic, "Shutdown", "Reset local values and source-of-truth state");
+                        serverSync.InitialSyncDone = false;
                         serverSync.ResetConfigsFromServer();
                         serverSync.IsSourceOfTruth = true;
-                        serverSync.InitialSyncDone = false;
-                        serverSync.pendingConfigBroadcasts.Clear();
-                        serverSync.pendingCustomValueBroadcasts.Clear();
-                        serverSync.pendingSequencedCustomValuePackages.Clear();
-                        foreach (string cacheKey in serverSync.configValueCache.Keys.ToArray())
-                        {
-                            serverSync.RemoveFragmentAssembly(cacheKey);
-                        }
+                        serverSync.ServerLockedSettingChanged();
                     }
                     catch (Exception e)
                     {
@@ -786,39 +875,51 @@ public partial class ConditionalConfigSync
             }
             finally
             {
+                ResetNetworkSessionState();
+                isServer = false;
                 ProcessingServerUpdate = false;
             }
 
-            // Subscribers see the fully restored local state and are free to rebuild local caches.
+            // Subscribers see restored values, local ownership, and an inactive network session.
             foreach (ConditionalConfigSync serverSync in instances)
             {
                 serverSync.InvokeEventHandlers(serverSync.ServerConnectionReset, nameof(ServerConnectionReset));
             }
-
-            ResetNetworkSessionState();
-            isServer = false;
         }
     }
 
     private static long packageCounter = 0;
 
-    private IEnumerator<bool> DistributeConfigToPeer(ZNetPeer peer, ZPackage package)
+    private bool IsCurrentPeerSend(ZNetPeer peer, ZRpc rpc, SendSlot slot)
     {
-        if (!GameReflection.HasZRoutedRpc)
+        return IsCurrentSend(slot)
+            && ReferenceEquals(GameReflection.GetPeer(rpc, slot.Session), peer)
+            && ReferenceEquals(GameReflection.GetPeerRpc(peer), rpc)
+            && GameReflection.GetPeerSocket(peer) is { } socket && GameReflection.SocketIsConnected(socket);
+    }
+
+    private IEnumerator<bool> DistributeConfigToPeer(ZNetPeer peer, ZPackage package, SendSlot slot)
+    {
+        if (!GameReflection.HasZRoutedRpc || !IsCurrentSend(slot))
         {
             yield break;
         }
 
+        ZRpc rpc = GameReflection.GetPeerRpc(peer);
+        bool server = GameReflection.IsServer(slot.Session);
+
         IEnumerable<bool> waitForQueue()
         {
-            float timeout = Time.time + 30;
-            while (GameReflection.GetPeerSocket(peer) is { } peerSocket && GameReflection.SocketGetSendQueueSize(peerSocket) > maximumSendQueueSize)
+            float timeout = Time.realtimeSinceStartup + 30;
+            while (IsCurrentPeerSend(peer, rpc, slot)
+                && GameReflection.GetPeerSocket(peer) is { } peerSocket
+                && GameReflection.SocketGetSendQueueSize(peerSocket) > maximumSendQueueSize)
             {
-                if (Time.time > timeout)
+                if (Time.realtimeSinceStartup > timeout)
                 {
                     DebugWarning("Network", $"Disconnecting {FormatPeer(peer)} after 30 seconds config sending timeout");
-                    GameReflection.InvokeRpc(GameReflection.GetPeerRpc(peer), "Error", ZNet.ConnectionStatus.ErrorConnectFailed);
-                    GameReflection.Disconnect(peer);
+                    GameReflection.InvokeRpc(rpc, "Error", (int)ZNet.ConnectionStatus.ErrorConnectFailed);
+                    GameReflection.Disconnect(peer, slot.Session);
                     yield break;
                 }
 
@@ -829,9 +930,9 @@ public partial class ConditionalConfigSync
         void SendPackage(ZPackage pkg)
         {
             string method = Name + " ConditionalConfigSync";
-            if (isServer)
+            if (server)
             {
-                GameReflection.InvokeRpc(GameReflection.GetPeerRpc(peer), method, pkg);
+                GameReflection.InvokeRpc(rpc, method, pkg);
             }
             else
             {
@@ -854,7 +955,7 @@ public partial class ConditionalConfigSync
                 {
                     yield return wait;
                 }
-                if (GameReflection.GetPeerSocket(peer) is not { } connectedSocket || !GameReflection.SocketIsConnected(connectedSocket))
+                if (!IsCurrentPeerSend(peer, rpc, slot))
                 {
                     yield break;
                 }
@@ -884,36 +985,123 @@ public partial class ConditionalConfigSync
                 yield return wait;
             }
 
-            SendPackage(package);
+            if (IsCurrentPeerSend(peer, rpc, slot))
+            {
+                SendPackage(package);
+            }
         }
     }
 
-    private IEnumerator SendZPackage(long target, ZPackage package)
+    private IEnumerator SendZPackage(long target, ZPackage package, bool sequenced = false, SendSlot? reservation = null)
     {
-        if (!GameReflection.HasZNet)
-        {
-            yield break;
-        }
-
-        List<ZNetPeer> peers = GameReflection.GetRoutedPeers();
-        if (target != GameReflection.Everybody)
-        {
-            peers = peers.Where(p => GameReflection.GetPeerUid(p) == target).ToList();
-        }
-
-        yield return SendZPackage(peers, package);
-    }
-
-    private IEnumerator SendZPackage(List<ZNetPeer> peers, ZPackage package, bool packagePrepared = false, int rawSizeHint = -1)
-    {
-        if (!GameReflection.HasZNet || peers.Count == 0)
-        {
-            yield break;
-        }
-
+        IEnumerator? sender = null;
         try
         {
-            ++sendCount;
+            if (!sessionActive || !GameReflection.HasZNet)
+            {
+                yield break;
+            }
+
+            List<ZNetPeer> peers = GameReflection.GetRoutedPeers();
+            if (target != GameReflection.Everybody)
+            {
+                peers = peers.Where(p => GameReflection.GetPeerUid(p) == target).ToList();
+            }
+
+            sender = SendZPackage(peers, package, sequenced: sequenced, reservation: reservation);
+            while (sender.MoveNext())
+            {
+                yield return sender.Current;
+            }
+        }
+        finally
+        {
+            (sender as IDisposable)?.Dispose();
+            if (reservation != null)
+            {
+                ReleaseSendSlot(reservation);
+            }
+        }
+    }
+
+    private void DisposeSendWriter(IEnumerator<bool> writer)
+    {
+        try
+        {
+            writer.Dispose();
+        }
+        catch (Exception e)
+        {
+            DebugWarning("Network", $"Failed to dispose a completed peer sender: {e}");
+        }
+    }
+
+    private void AdvanceSendWriters(List<KeyValuePair<ZNetPeer, IEnumerator<bool>>> writers, SendSlot slot)
+    {
+        for (int index = writers.Count - 1; index >= 0; --index)
+        {
+            if (!IsCurrentSend(slot))
+            {
+                return;
+            }
+
+            KeyValuePair<ZNetPeer, IEnumerator<bool>> entry = writers[index];
+            bool active = false;
+            try
+            {
+                active = entry.Value.MoveNext();
+            }
+            catch (Exception e)
+            {
+                RejectSync($"Failed to send synchronization to {FormatPeer(entry.Key)}: {e.Message}", null, incoming: false, e);
+                try
+                {
+                    // Do not continue later ordered events after a failed fragmented transfer.
+                    if (IsCurrentSend(slot))
+                    {
+                        GameReflection.Disconnect(entry.Key, slot.Session);
+                    }
+                }
+                catch (Exception disconnectError)
+                {
+                    DebugWarning("Network", $"Failed to disconnect a peer after a send failure: {disconnectError}");
+                }
+            }
+            if (!active)
+            {
+                DisposeSendWriter(entry.Value);
+                writers.RemoveAt(index);
+            }
+        }
+    }
+
+    private IEnumerator SendZPackage(List<ZNetPeer> peers, ZPackage package, bool packagePrepared = false,
+        int rawSizeHint = -1, bool sequenced = false, SendSlot? reservation = null)
+    {
+        SendSlot? slot = reservation;
+        List<KeyValuePair<ZNetPeer, IEnumerator<bool>>> writers = new();
+        try
+        {
+            if (!sessionActive || !GameReflection.HasZNet || peers.Count == 0)
+            {
+                yield break;
+            }
+
+            slot ??= ReserveSendSlot(sequenced);
+            if (slot == null)
+            {
+                yield break;
+            }
+            while (IsCurrentSend(slot) && (sendQueue.First != slot.Node || ProcessingServerUpdate || IsProcessing || packagePreparationDepth > 0))
+            {
+                yield return null;
+            }
+            if (!IsCurrentSend(slot) || !isServer && !CanBroadcastFromThisSide())
+            {
+                yield break;
+            }
+            StartSendSlot(slot);
+
             int rawSize = packagePrepared && rawSizeHint >= 0 ? rawSizeHint : GameReflection.PackageSize(package);
             if (rawSize > maxPayloadSize)
             {
@@ -958,21 +1146,29 @@ public partial class ConditionalConfigSync
                 DebugLog(ConditionalConfigSyncDebugLevel.Trace, "Network", $"Sending package: size={FormatByteCount(rawSize)}, peers={peers.Count}");
             }
 
-            List<IEnumerator<bool>> writers = peers.Where(GameReflection.IsPeerReady).Select(p => DistributeConfigToPeer(p, package)).ToList();
-            writers.RemoveAll(writer => !writer.MoveNext());
-            while (writers.Count > 0)
+            foreach (ZNetPeer peer in peers.Where(GameReflection.IsPeerReady).ToArray())
             {
-                yield return null;
-                writers.RemoveAll(writer => !writer.MoveNext());
+                writers.Add(new KeyValuePair<ZNetPeer, IEnumerator<bool>>(peer, DistributeConfigToPeer(peer, package, slot)));
+            }
+            while (writers.Count > 0 && IsCurrentSend(slot))
+            {
+                AdvanceSendWriters(writers, slot);
+                if (writers.Count > 0)
+                {
+                    yield return null;
+                }
             }
         }
         finally
         {
-            if (sendCount > 0)
+            foreach (KeyValuePair<ZNetPeer, IEnumerator<bool>> writer in writers)
             {
-                --sendCount;
+                DisposeSendWriter(writer.Value);
             }
-            FlushPendingBroadcastsIfIdle();
+            if (slot != null)
+            {
+                ReleaseSendSlot(slot);
+            }
         }
     }
 
@@ -1090,19 +1286,15 @@ public partial class ConditionalConfigSync
 
             void SendBufferedData()
             {
-                BufferingSocket bufferingSocket;
-                if (GameReflection.GetRpcSocket(rpc) is BufferingSocket currentBufferingSocket)
+                BufferingSocket bufferingSocket = __state;
+                if (ReferenceEquals(GameReflection.GetRpcSocket(rpc), bufferingSocket))
                 {
-                    GameReflection.SetRpcSocket(rpc, currentBufferingSocket.Original);
-                    if (GameReflection.GetPeer(rpc, __instance) is ZNetPeer currentPeer)
-                    {
-                        GameReflection.SetPeerSocket(currentPeer, currentBufferingSocket.Original);
-                    }
-                    bufferingSocket = currentBufferingSocket;
+                    GameReflection.SetRpcSocket(rpc, bufferingSocket.Original);
                 }
-                else
+                if (GameReflection.GetPeer(rpc, __instance) is ZNetPeer currentPeer
+                    && ReferenceEquals(GameReflection.GetPeerSocket(currentPeer), bufferingSocket))
                 {
-                    bufferingSocket = __state;
+                    GameReflection.SetPeerSocket(currentPeer, bufferingSocket.Original);
                 }
 
                 if (bufferingSocket.finished)
@@ -1111,18 +1303,30 @@ public partial class ConditionalConfigSync
                 }
 
                 bufferingSocket.finished = true;
-
-                for (int i = 0; i < bufferingSocket.Package.Count; ++i)
+                try
                 {
-                    if (i == bufferingSocket.versionMatchQueued)
+                    if (!sessionActive || !ReferenceEquals(GameReflection.ZNetInstance, __instance)
+                        || !GameReflection.SocketIsConnected(bufferingSocket.Original))
+                    {
+                        return;
+                    }
+                    for (int i = 0; i < bufferingSocket.Package.Count; ++i)
+                    {
+                        if (i == bufferingSocket.versionMatchQueued)
+                        {
+                            GameReflection.SocketVersionMatch(bufferingSocket.Original);
+                        }
+                        GameReflection.SocketSend(bufferingSocket.Original, bufferingSocket.Package[i]);
+                    }
+                    if (bufferingSocket.Package.Count == bufferingSocket.versionMatchQueued)
                     {
                         GameReflection.SocketVersionMatch(bufferingSocket.Original);
                     }
-                    GameReflection.SocketSend(bufferingSocket.Original, bufferingSocket.Package[i]);
                 }
-                if (bufferingSocket.Package.Count == bufferingSocket.versionMatchQueued)
+                finally
                 {
-                    GameReflection.SocketVersionMatch(bufferingSocket.Original);
+                    bufferingSocket.Package.Clear();
+                    bufferingSocket.versionMatchQueued = -1;
                 }
             }
 
@@ -1132,24 +1336,59 @@ public partial class ConditionalConfigSync
                 return;
             }
 
+            // Reserve every consumer before the first coroutine can yield. A later consumer's
+            // partial update must not arrive before its initial full snapshot.
+            KeyValuePair<ConditionalConfigSync, SendSlot?>[] initialSends = configSyncs.ToArray()
+                .Select(sync => new KeyValuePair<ConditionalConfigSync, SendSlot?>(sync, sync.ReserveSendSlot()))
+                .ToArray();
+
+            void ReleaseInitialSends()
+            {
+                foreach (KeyValuePair<ConditionalConfigSync, SendSlot?> entry in initialSends)
+                {
+                    if (entry.Value != null)
+                    {
+                        entry.Key.ReleaseSendSlot(entry.Value);
+                    }
+                }
+            }
+
             IEnumerator sendAsync()
             {
                 try
                 {
-                    foreach (ConditionalConfigSync configSync in configSyncs)
+                    foreach (KeyValuePair<ConditionalConfigSync, SendSlot?> entry in initialSends)
                     {
+                        if (entry.Value == null || !entry.Key.IsCurrentSend(entry.Value))
+                        {
+                            continue;
+                        }
                         yield return GameReflection.StartCoroutine(
-                            configSync.SendFullSyncPackage(peer, "InitialSync", "Sending full sync to"),
+                            entry.Key.SendFullSyncPackage(peer, "InitialSync", "Sending full sync to", entry.Value),
                             __instance);
                     }
                 }
                 finally
                 {
+                    ReleaseInitialSends();
                     SendBufferedData();
                 }
             }
 
-            GameReflection.StartCoroutine(sendAsync(), __instance);
+            try
+            {
+                if (GameReflection.StartCoroutine(sendAsync(), __instance) == null)
+                {
+                    ReleaseInitialSends();
+                    SendBufferedData();
+                }
+            }
+            catch
+            {
+                ReleaseInitialSends();
+                SendBufferedData();
+                throw;
+            }
         }
     }
 
@@ -1173,7 +1412,7 @@ public partial class ConditionalConfigSync
             return;
         }
 
-        StartBroadcastPackage(target, ConfigsToPackage(configs: configs, includeConfigStates: isServer));
+        StartBroadcastPackage(target, () => ConfigsToPackage(configs: configs, includeConfigStates: isServer));
     }
 
     private void Broadcast(long target, params CustomSyncedValueBase[] customValues)
@@ -1190,39 +1429,98 @@ public partial class ConditionalConfigSync
             {
                 if (customValue.PreserveUpdateSequence)
                 {
-                    TryEnqueueSequencedPackage(ConfigsToPackage(customValues: new[] { customValue }), customValue.Identifier);
+                    TryEnqueueSequencedPackage(() => ConfigsToPackage(customValues: new[] { customValue }), customValue.Identifier);
                 }
                 else
                 {
                     pendingCustomValueBroadcasts.Add(customValue);
                 }
             }
+            FlushPendingBroadcastsForAllIfIdle();
             return;
         }
 
-        StartBroadcastPackage(target, ConfigsToPackage(customValues: customValues));
+        StartBroadcastPackage(target, () => ConfigsToPackage(customValues: customValues), customValues.Any(value => value.PreserveUpdateSequence));
     }
 
-    private void StartBroadcastPackage(long target, ZPackage package)
+    private bool StartBroadcastPackage(long target, ZPackage package, bool sequenced = false)
+        => StartBroadcastPackage(target, () => package, sequenced);
+
+    private bool StartBroadcastPackage(List<ZNetPeer> peers, ZPackage package)
+        => StartBroadcastPackage(peers, () => package);
+
+    private bool StartBroadcastPackage(long target, Func<ZPackage> createPackage, bool sequenced = false, SendSlot? reservation = null)
+        => StartBroadcastPackageCore(createPackage, (package, slot) => SendZPackage(target, package, sequenced, slot), sequenced, reservation);
+
+    private bool StartBroadcastPackage(List<ZNetPeer> peers, Func<ZPackage> createPackage)
+        => StartBroadcastPackageCore(createPackage, (package, slot) => SendZPackage(peers, package, reservation: slot));
+
+    private bool StartBroadcastPackageCore(Func<ZPackage> createPackage, Func<ZPackage, SendSlot, IEnumerator> createSender,
+        bool sequenced = false, SendSlot? reservation = null)
     {
-        if (ValidateOutgoingPayload(package, "synchronization package"))
+        SendSlot? slot = reservation ?? ReserveSendSlot(sequenced);
+        if (slot == null)
         {
-            GameReflection.StartCoroutine(SendZPackage(target, package));
+            return false;
         }
-    }
 
-    private void StartBroadcastPackage(List<ZNetPeer> peers, ZPackage package)
-    {
-        if (ValidateOutgoingPayload(package, "synchronization package"))
+        bool scheduled = false;
+        try
         {
-            GameReflection.StartCoroutine(SendZPackage(peers, package));
+            if (!IsCurrentSend(slot))
+            {
+                return false;
+            }
+            ZPackage package;
+            ++packagePreparationDepth;
+            try
+            {
+                package = createPackage();
+            }
+            finally
+            {
+                --packagePreparationDepth;
+            }
+            if (!IsCurrentSend(slot) || !ValidateOutgoingPayload(package, "synchronization package"))
+            {
+                return false;
+            }
+
+            scheduled = GameReflection.StartCoroutine(createSender(package, slot), slot.Session) != null;
+            if (!scheduled)
+            {
+                RejectSync("Could not start the synchronization sender for the active session.", null, incoming: false);
+            }
+            return scheduled;
+        }
+        catch (Exception e)
+        {
+            RejectSync($"Failed to prepare or schedule synchronization: {e.Message}", null, incoming: false, e);
+            return false;
+        }
+        finally
+        {
+            if (!scheduled)
+            {
+                ReleaseSendSlot(slot);
+            }
         }
     }
 
     private void FlushPendingBroadcastsIfIdle()
     {
-        if (ProcessingServerUpdate || IsProcessing || IsSending || flushingPendingBroadcasts || !GameReflection.HasZNet || !CanBroadcastFromThisSide())
+        if (ProcessingServerUpdate || packagePreparationDepth > 0 || IsProcessing || flushingPendingBroadcasts || !sessionActive || !GameReflection.HasZNet)
         {
+            return;
+        }
+        if (!CanBroadcastFromThisSide())
+        {
+            if (!IsSourceOfTruth && InitialSyncDone)
+            {
+                pendingConfigBroadcasts.Clear();
+                pendingCustomValueBroadcasts.Clear();
+                pendingSequencedCustomValuePackages.Clear();
+            }
             return;
         }
 
@@ -1235,28 +1533,43 @@ public partial class ConditionalConfigSync
         DebugLog(ConditionalConfigSyncDebugLevel.Basic, "Pending", $"Flushing configs={pendingConfigBroadcasts.Count}, custom={pendingCustomValueBroadcasts.Count}, sequenced={pendingSequencedCustomValuePackages.Count}");
         try
         {
-            while (pendingSequencedCustomValuePackages.Count > 0)
+            // Transfer captured events into the FIFO even while another package is sending.
+            // Latest-state values remain coalesced until the current send queue is drained.
+            int sequenceCount = pendingSequencedCustomValuePackages.Count;
+            for (int index = 0; index < sequenceCount; ++index)
             {
-                StartBroadcastPackage(GameReflection.Everybody, pendingSequencedCustomValuePackages.Dequeue());
+                if (pendingSequencedCustomValuePackages.First?.Value.Package is not { } package)
+                {
+                    break;
+                }
+                pendingSequencedCustomValuePackages.RemoveFirst();
+                StartBroadcastPackage(GameReflection.Everybody, package, sequenced: true);
             }
 
-            if (pendingConfigBroadcasts.Count > 0)
+            if (!IsSending && pendingConfigBroadcasts.Count > 0)
             {
                 ConfigEntryBase[] configs = pendingConfigBroadcasts.Where(config => GetConfigData(config) is { } data && ShouldBroadcastConfigChange(data)).ToArray();
                 pendingConfigBroadcasts.Clear();
-                if (configs.Length > 0)
+                if (configs.Length > 0 && !StartBroadcastPackage(GameReflection.Everybody, () => ConfigsToPackage(configs: configs, includeConfigStates: isServer)))
                 {
-                    StartBroadcastPackage(GameReflection.Everybody, ConfigsToPackage(configs: configs, includeConfigStates: isServer));
+                    // A failing converter must not discard unrelated healthy entries in the batch.
+                    foreach (ConfigEntryBase config in configs)
+                    {
+                        StartBroadcastPackage(GameReflection.Everybody, () => ConfigsToPackage(configs: new[] { config }, includeConfigStates: isServer));
+                    }
                 }
             }
 
-            if (pendingCustomValueBroadcasts.Count > 0)
+            if (!IsSending && pendingCustomValueBroadcasts.Count > 0)
             {
                 CustomSyncedValueBase[] values = pendingCustomValueBroadcasts.OrderByDescending(v => v.Priority).ThenBy(v => v.RegistrationIndex).ToArray();
                 pendingCustomValueBroadcasts.Clear();
-                if (values.Length > 0)
+                if (values.Length > 0 && !StartBroadcastPackage(GameReflection.Everybody, () => ConfigsToPackage(customValues: values)))
                 {
-                    StartBroadcastPackage(GameReflection.Everybody, ConfigsToPackage(customValues: values));
+                    foreach (CustomSyncedValueBase value in values)
+                    {
+                        StartBroadcastPackage(GameReflection.Everybody, () => ConfigsToPackage(customValues: new[] { value }));
+                    }
                 }
             }
         }
