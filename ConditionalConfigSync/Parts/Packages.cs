@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
@@ -14,6 +15,10 @@ namespace ConditionalConfigSync;
 
 public partial class ConditionalConfigSync
 {
+    private const int largeStringCustomValueWarningBytes = 128 * 1024;
+
+    private readonly HashSet<string> largeStringCustomValueWarnings = new(StringComparer.Ordinal);
+
     private readonly struct ReceivedConfigState
     {
         public readonly bool ServerControlled;
@@ -549,7 +554,7 @@ public partial class ConditionalConfigSync
         public static PackageEntry ConfigState(ConfigEntryBase config, bool serverControlled, bool hidden) => new() { kind = PackageEntryKind.ConfigState, section = config.Definition.Section, key = config.Definition.Key, serverControlled = serverControlled, hidden = hidden };
     }
 
-    private static ZPackage ConfigsToPackage(
+    private ZPackage ConfigsToPackage(
         IEnumerable<ConfigEntryBase>? configs = null,
         IEnumerable<CustomSyncedValueBase>? customValues = null,
         IEnumerable<PackageEntry>? packageEntries = null,
@@ -558,6 +563,8 @@ public partial class ConditionalConfigSync
         bool includeAllProvidedConfigStates = false,
         bool includeConfigStates = true)
     {
+        bool measureSerialization = ShouldDebugLog(ConditionalConfigSyncDebugLevel.Verbose);
+        long serializationStarted = measureSerialization ? Stopwatch.GetTimestamp() : 0;
         List<OwnConfigEntryBase> configList = new();
         if (configs != null)
         {
@@ -601,10 +608,21 @@ public partial class ConditionalConfigSync
             AddEntryToPackage(package, new PackageEntry { kind = PackageEntryKind.Config, section = config.BaseConfig.Definition.Section, key = config.BaseConfig.Definition.Key, type = config.BaseConfig.SettingType, value = config.BaseConfig.BoxedValue });
         }
 
+        if (measureSerialization)
+        {
+            int rawSize = GameReflection.PackageSize(package);
+            DebugLog(
+                ConditionalConfigSyncDebugLevel.Verbose,
+                "Serialization",
+                $"Serialized {(partial ? "partial" : "full")} package: configs={valueConfigList.Count}, states={configStateCount}, " +
+                $"custom={customValueList.Count}, metadata={packageEntryList.Count}, raw={FormatByteCount(rawSize)}, " +
+                $"time={FormatMilliseconds(ElapsedMilliseconds(serializationStarted))}");
+        }
+
         return package;
     }
 
-    private static void AddEntryToPackage(ZPackage package, PackageEntry entry)
+    private void AddEntryToPackage(ZPackage package, PackageEntry entry)
     {
         ZPackage payload = GameReflection.NewPackage();
         switch (entry.kind)
@@ -639,8 +657,56 @@ public partial class ConditionalConfigSync
                 throw new ArgumentOutOfRangeException(nameof(entry.kind), entry.kind, null);
         }
 
+        byte[] payloadBytes = GameReflection.PackageGetArray(payload);
         GameReflection.PackageWrite(package, (byte)entry.kind);
-        GameReflection.PackageWrite(package, GameReflection.PackageGetArray(payload));
+        GameReflection.PackageWrite(package, payloadBytes);
+        LogSerializedEntrySize(entry, payloadBytes.Length);
+    }
+
+    private void LogSerializedEntrySize(PackageEntry entry, int payloadBytes)
+    {
+        bool trace = ShouldDebugLog(ConditionalConfigSyncDebugLevel.Trace);
+        bool largeStringCandidate = entry.kind == PackageEntryKind.CustomValue
+                                    && entry.type == typeof(string)
+                                    && !largeStringCustomValueWarnings.Contains(entry.key ?? "<unnamed>");
+        if (!trace && !largeStringCandidate)
+        {
+            return;
+        }
+
+        switch (entry.kind)
+        {
+            case PackageEntryKind.Config:
+                if (trace)
+                {
+                    DebugLog(
+                        ConditionalConfigSyncDebugLevel.Trace,
+                        "Serialization",
+                        $"Entry config '{entry.section} -> {entry.key}': type={entry.type?.Name ?? "unknown"}, payload={FormatByteCount(payloadBytes)}");
+                }
+                break;
+
+            case PackageEntryKind.CustomValue:
+                string identifier = entry.key ?? "<unnamed>";
+                if (trace)
+                {
+                    DebugLog(
+                        ConditionalConfigSyncDebugLevel.Trace,
+                        "Serialization",
+                        $"Entry custom '{identifier}': type={entry.type?.Name ?? "unknown"}, payload={FormatByteCount(payloadBytes)}");
+                }
+
+                if (entry.type == typeof(string)
+                    && payloadBytes >= largeStringCustomValueWarningBytes
+                    && largeStringCustomValueWarnings.Add(identifier))
+                {
+                    DebugWarning(
+                        "Serialization",
+                        $"Large string custom value '{identifier}' serialized to {FormatByteCount(payloadBytes)}. " +
+                        "When possible, synchronize parsed structured or binary runtime data instead of source text to avoid repeated text allocation and parsing.");
+                }
+                break;
+        }
     }
 
     private static string GetZPackageTypeString(Type type) => type.AssemblyQualifiedName!;

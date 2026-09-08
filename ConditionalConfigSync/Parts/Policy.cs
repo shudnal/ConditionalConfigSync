@@ -416,6 +416,10 @@ public partial class ConditionalConfigSync
 
         if (changed.Count > 0)
         {
+            if (isServer)
+            {
+                InvalidateFullSyncSnapshot($"policy state changed: {source}");
+            }
             ServerLockedSettingChanged();
         }
 

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
@@ -266,6 +267,42 @@ public partial class ConditionalConfigSync
     private void DebugWarning(string area, string message)
     {
         LogSource.LogWarning($"[{GetDebugModName()}][{GetDebugSide()}][{area}] {message}");
+    }
+
+    private static double ElapsedMilliseconds(long startTimestamp)
+    {
+        return (Stopwatch.GetTimestamp() - startTimestamp) * 1000d / Stopwatch.Frequency;
+    }
+
+    private static string FormatByteCount(int bytes)
+    {
+        if (bytes >= 1024 * 1024)
+        {
+            return $"{(bytes / (1024d * 1024d)).ToString("F2", CultureInfo.InvariantCulture)} MiB ({bytes} bytes)";
+        }
+        if (bytes >= 1024)
+        {
+            return $"{(bytes / 1024d).ToString("F1", CultureInfo.InvariantCulture)} KiB ({bytes} bytes)";
+        }
+        return $"{bytes} bytes";
+    }
+
+    private static string FormatMilliseconds(double milliseconds)
+    {
+        return milliseconds.ToString("F2", CultureInfo.InvariantCulture) + " ms";
+    }
+
+    private static string FormatCompressionStats(int rawSize, int compressedSize)
+    {
+        if (rawSize <= 0)
+        {
+            return $"raw={FormatByteCount(rawSize)}, compressed={FormatByteCount(compressedSize)}";
+        }
+
+        double ratio = compressedSize * 100d / rawSize;
+        double saved = 100d - ratio;
+        return $"raw={FormatByteCount(rawSize)}, compressed={FormatByteCount(compressedSize)}, " +
+               $"ratio={ratio.ToString("F1", CultureInfo.InvariantCulture)}%, saved={saved.ToString("F1", CultureInfo.InvariantCulture)}%";
     }
 
     private string GetDebugModName()

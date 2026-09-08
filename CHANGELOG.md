@@ -1,3 +1,8 @@
+# 1.0.5
+* cached full server synchronization snapshots per authoritative state revision and administrator class, reusing already serialized and compressed wire data for later initial syncs, complete resyncs, and full authoritative corrections until synchronized state changes
+* added Verbose serialization and compression diagnostics with raw/wire sizes, compression ratio, time spent serializing/compressing, and full-snapshot build/reuse reporting
+* added Trace per-entry serialized payload sizes plus a once-per-session warning for large synchronized string custom values that are candidates for parsed structured or binary transfer
+
 # 1.0.4
 * fixed a Visual Studio CPS `LimitedFunctionality` project-tree error by removing the imported `Thunderstore.targets` file from the SDK default `None` item list while keeping it as an explicit MSBuild import
 * fixed the 1.0.4 source build against the existing Unity reference set by removing an unnecessary `Canvas.ForceUpdateCanvases()` call from connection-error layout normalization

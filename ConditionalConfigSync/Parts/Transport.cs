@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -76,6 +77,10 @@ public partial class ConditionalConfigSync
         }
 
         syncedEntry.StoreLastAcceptedValue(configEntry.BoxedValue);
+        if (isServer && IsSourceOfTruth && ShouldBroadcastConfigChange(syncedEntry))
+        {
+            InvalidateFullSyncSnapshot($"config changed: {configEntry.Definition.Section} -> {configEntry.Definition.Key}");
+        }
 
         if (!ShouldBroadcastConfigChange(syncedEntry) || !CanBroadcastFromThisSide())
         {
@@ -109,6 +114,10 @@ public partial class ConditionalConfigSync
         if (IsSourceOfTruth)
         {
             customValue.StoreLastAcceptedValue(customValue.BoxedValue);
+            if (isServer)
+            {
+                InvalidateFullSyncSnapshot($"custom value changed: {customValue.Identifier}");
+            }
         }
 
         if (!CanBroadcastFromThisSide())
@@ -194,13 +203,12 @@ public partial class ConditionalConfigSync
 
                         void SendAdmin(List<ZNetPeer> peers, bool isAdmin)
                         {
-                            ZPackage package = ConfigsToPackage(packageEntries: new[]
-                            {
-                                PackageEntry.LockExempt(isAdmin),
-                            });
-
                             if (configSyncs.FirstOrDefault() is { } configSync)
                             {
+                                ZPackage package = configSync.ConfigsToPackage(packageEntries: new[]
+                                {
+                                    PackageEntry.LockExempt(isAdmin),
+                                });
                                 GameReflection.StartCoroutine(configSync.SendZPackage(peers, package), __instance);
                             }
                         }
@@ -570,6 +578,7 @@ public partial class ConditionalConfigSync
             {
                 string authorization = senderIsAdmin ? "administrator" : "configuration is unlocked and client updates are enabled";
                 LogAcceptedClientUpdate(sender, configs, authorization);
+                InvalidateFullSyncSnapshot($"accepted client update from {FormatClient(sender)}");
 
                 ZPackage canonicalPackage = ConfigsToPackage(
                     configs.configValues.Keys.Select(config => config.BaseConfig),
@@ -728,15 +737,19 @@ public partial class ConditionalConfigSync
         bool requireFullSync = configs == null
                                || !string.IsNullOrEmpty(configs.rejectionReason)
                                || configs.configValues.Count == 0 && configs.customValues.Count == 0;
-        ZPackage correction = requireFullSync
-            ? CreateFullSyncPackage(peer)
-            : ConfigsToPackage(
-                configs.configValues.Keys.Select(config => config.BaseConfig),
-                configs.customValues.Keys,
-                partial: true,
-                includeConfigValues: true,
-                includeAllProvidedConfigStates: true,
-                includeConfigStates: true);
+        if (requireFullSync)
+        {
+            StartFullSyncPackage(peer, "Correction", "Sending authoritative full correction to");
+            return;
+        }
+
+        ZPackage correction = ConfigsToPackage(
+            configs.configValues.Keys.Select(config => config.BaseConfig),
+            configs.customValues.Keys,
+            partial: true,
+            includeConfigValues: true,
+            includeAllProvidedConfigStates: true,
+            includeConfigStates: true);
         StartBroadcastPackage(new List<ZNetPeer> { peer }, correction);
     }
 
@@ -891,7 +904,7 @@ public partial class ConditionalConfigSync
         yield return SendZPackage(peers, package);
     }
 
-    private IEnumerator SendZPackage(List<ZNetPeer> peers, ZPackage package)
+    private IEnumerator SendZPackage(List<ZNetPeer> peers, ZPackage package, bool packagePrepared = false, int rawSizeHint = -1)
     {
         if (!GameReflection.HasZNet || peers.Count == 0)
         {
@@ -901,27 +914,48 @@ public partial class ConditionalConfigSync
         try
         {
             ++sendCount;
-            int rawSize = GameReflection.PackageSize(package);
+            int rawSize = packagePrepared && rawSizeHint >= 0 ? rawSizeHint : GameReflection.PackageSize(package);
             if (rawSize > maxPayloadSize)
             {
                 RejectSync($"Rejected outgoing synchronization package: serialized payload is {rawSize} bytes, limit is {maxPayloadSize} bytes.", null, incoming: false);
                 yield break;
             }
 
-            if (rawSize > compressMinSize)
+            if (packagePrepared)
             {
+                int wireSize = GameReflection.PackageSize(package);
+                if (wireSize > maxPayloadSize)
+                {
+                    RejectSync($"Rejected outgoing prepared package: payload is {wireSize} bytes, limit is {maxPayloadSize} bytes.", null, incoming: false);
+                    yield break;
+                }
+
+                DebugLog(
+                    ConditionalConfigSyncDebugLevel.Verbose,
+                    "Network",
+                    $"Sending prepared package: raw={FormatByteCount(rawSize)}, wire={FormatByteCount(wireSize)}, peers={peers.Count}");
+            }
+            else if (rawSize > compressMinSize)
+            {
+                bool measureCompression = ShouldDebugLog(ConditionalConfigSyncDebugLevel.Verbose);
+                long compressionStarted = measureCompression ? Stopwatch.GetTimestamp() : 0;
                 package = CompressPackage(package);
+                double compressionMilliseconds = measureCompression ? ElapsedMilliseconds(compressionStarted) : 0d;
                 int compressedSize = GameReflection.PackageSize(package);
                 if (compressedSize > maxPayloadSize)
                 {
                     RejectSync($"Rejected outgoing compressed package: payload is {compressedSize} bytes, limit is {maxPayloadSize} bytes.", null, incoming: false);
                     yield break;
                 }
-                DebugLog(ConditionalConfigSyncDebugLevel.Verbose, "Network", $"Compressed outgoing package: raw={rawSize}, compressed={compressedSize}, peers={peers.Count}");
+                DebugLog(
+                    ConditionalConfigSyncDebugLevel.Verbose,
+                    "Network",
+                    $"Compressed outgoing package: {FormatCompressionStats(rawSize, compressedSize)}, " +
+                    $"compress={FormatMilliseconds(compressionMilliseconds)}, peers={peers.Count}");
             }
             else
             {
-                DebugLog(ConditionalConfigSyncDebugLevel.Trace, "Network", $"Sending package: size={rawSize}, peers={peers.Count}");
+                DebugLog(ConditionalConfigSyncDebugLevel.Trace, "Network", $"Sending package: size={FormatByteCount(rawSize)}, peers={peers.Count}");
             }
 
             List<IEnumerator<bool>> writers = peers.Where(GameReflection.IsPeerReady).Select(p => DistributeConfigToPeer(p, package)).ToList();
@@ -1104,10 +1138,9 @@ public partial class ConditionalConfigSync
                 {
                     foreach (ConditionalConfigSync configSync in configSyncs)
                     {
-                        ZPackage package = configSync.CreateFullSyncPackage(peer);
-                        configSync.DebugLog(ConditionalConfigSyncDebugLevel.Basic, "InitialSync", $"Sending full sync to {FormatPeer(peer)}, admin={IsPeerAdmin(peer)}, configs={configSync.allConfigs.Count}, custom={configSync.allCustomValues.Count}, size={GameReflection.PackageSize(package)}");
-
-                        yield return GameReflection.StartCoroutine(configSync.SendZPackage(new List<ZNetPeer> { peer }, package), __instance);
+                        yield return GameReflection.StartCoroutine(
+                            configSync.SendFullSyncPackage(peer, "InitialSync", "Sending full sync to"),
+                            __instance);
                     }
                 }
                 finally

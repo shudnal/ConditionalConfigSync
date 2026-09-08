@@ -1,4 +1,6 @@
-using System;
+﻿using System;
+using System.Collections;
+using System.Diagnostics;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
@@ -15,6 +17,8 @@ public partial class ConditionalConfigSync
     private const string ResyncRpcSuffix = " ConditionalConfigSync Resync";
     private const int StableReadAttempts = 5;
     private const int StableReadDelayMilliseconds = 50;
+    private const int FullSyncSnapshotBuildAttempts = 5;
+    private const int FullSyncSnapshotStableFrames = 2;
 
     private readonly VersionCheck versionCheck;
     private bool serverRpcsRegistered;
@@ -22,6 +26,99 @@ public partial class ConditionalConfigSync
     private readonly HashSet<OwnConfigEntryBase> lateRegisteredConfigs = new();
     private readonly HashSet<CustomSyncedValueBase> lateRegisteredCustomValues = new();
     private bool lateRegistrationSyncScheduled;
+
+    internal readonly struct FullSyncSnapshotKey : IEquatable<FullSyncSnapshotKey>
+    {
+        internal readonly long Revision;
+        internal readonly bool Admin;
+        internal readonly string? ServerVersion;
+        internal readonly int ConfigCount;
+        internal readonly int CustomValueCount;
+        internal readonly bool HasLockingConfig;
+        internal readonly string? LockingConfigSection;
+        internal readonly string? LockingConfigKey;
+        internal readonly ConfigSyncMode LockingConfigSyncMode;
+        internal readonly bool LockingConfigSynchronized;
+        internal readonly bool LockingConfigServerControlled;
+        internal readonly bool LockingConfigHidden;
+
+        internal FullSyncSnapshotKey(
+            long revision,
+            bool admin,
+            string? serverVersion,
+            int configCount,
+            int customValueCount,
+            OwnConfigEntryBase? lockingConfig)
+        {
+            Revision = revision;
+            Admin = admin;
+            ServerVersion = serverVersion;
+            ConfigCount = configCount;
+            CustomValueCount = customValueCount;
+            HasLockingConfig = lockingConfig != null;
+            LockingConfigSection = lockingConfig?.BaseConfig.Definition.Section;
+            LockingConfigKey = lockingConfig?.BaseConfig.Definition.Key;
+            LockingConfigSyncMode = lockingConfig?.SyncMode ?? default;
+            LockingConfigSynchronized = lockingConfig?.SynchronizedConfig ?? false;
+            LockingConfigServerControlled = lockingConfig?.IsServerControlled ?? false;
+            LockingConfigHidden = lockingConfig?.IsHidden ?? false;
+        }
+
+        public bool Equals(FullSyncSnapshotKey other)
+        {
+            return Revision == other.Revision
+                   && Admin == other.Admin
+                   && string.Equals(ServerVersion, other.ServerVersion, StringComparison.Ordinal)
+                   && ConfigCount == other.ConfigCount
+                   && CustomValueCount == other.CustomValueCount
+                   && HasLockingConfig == other.HasLockingConfig
+                   && string.Equals(LockingConfigSection, other.LockingConfigSection, StringComparison.Ordinal)
+                   && string.Equals(LockingConfigKey, other.LockingConfigKey, StringComparison.Ordinal)
+                   && LockingConfigSyncMode == other.LockingConfigSyncMode
+                   && LockingConfigSynchronized == other.LockingConfigSynchronized
+                   && LockingConfigServerControlled == other.LockingConfigServerControlled
+                   && LockingConfigHidden == other.LockingConfigHidden;
+        }
+
+        public override bool Equals(object? obj) => obj is FullSyncSnapshotKey other && Equals(other);
+
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                int hash = Revision.GetHashCode();
+                hash = hash * 397 ^ Admin.GetHashCode();
+                hash = hash * 397 ^ (ServerVersion?.GetHashCode() ?? 0);
+                hash = hash * 397 ^ ConfigCount;
+                hash = hash * 397 ^ CustomValueCount;
+                hash = hash * 397 ^ HasLockingConfig.GetHashCode();
+                hash = hash * 397 ^ (LockingConfigSection?.GetHashCode() ?? 0);
+                hash = hash * 397 ^ (LockingConfigKey?.GetHashCode() ?? 0);
+                hash = hash * 397 ^ (int)LockingConfigSyncMode;
+                hash = hash * 397 ^ LockingConfigSynchronized.GetHashCode();
+                hash = hash * 397 ^ LockingConfigServerControlled.GetHashCode();
+                hash = hash * 397 ^ LockingConfigHidden.GetHashCode();
+                return hash;
+            }
+        }
+    }
+
+    private sealed class FullSyncSnapshot
+    {
+        internal FullSyncSnapshotKey Key;
+        internal int RawSize;
+        internal int WireSize;
+        internal bool Compressed;
+        internal bool SerializationMeasured;
+        internal bool CompressionMeasured;
+        internal double SerializationMilliseconds;
+        internal double CompressionMilliseconds;
+        internal byte[] WireBytes = Array.Empty<byte>();
+    }
+
+    private long fullSyncStateRevision = 1;
+    private FullSyncSnapshot? fullSyncAdminSnapshot;
+    private FullSyncSnapshot? fullSyncNonAdminSnapshot;
 
     private static bool sessionActive;
     private static Harmony? runtimeHarmony;
@@ -83,6 +180,7 @@ public partial class ConditionalConfigSync
 
         if (isServer)
         {
+            ResetFullSyncSnapshotCache(advanceRevision: false);
             RegisterServerRpcHandlers();
             InitialSyncDone = true;
         }
@@ -203,12 +301,7 @@ public partial class ConditionalConfigSync
                 return;
             }
 
-            ZPackage package = CreateFullSyncPackage(peer);
-            DebugLog(
-                ConditionalConfigSyncDebugLevel.Basic,
-                "Resync",
-                $"Sending complete resync to {FormatPeer(peer)}, configs={allConfigs.Count}, custom={allCustomValues.Count}, size={GameReflection.PackageSize(package)}");
-            StartBroadcastPackage(new List<ZNetPeer> { peer }, package);
+            StartFullSyncPackage(peer, "Resync", "Sending complete resync to");
         }
         catch (Exception e)
         {
@@ -216,7 +309,7 @@ public partial class ConditionalConfigSync
         }
     }
 
-    private ZPackage CreateFullSyncPackage(ZNetPeer peer)
+    private ZPackage CreateFullSyncPackageUncached(bool admin)
     {
         List<PackageEntry> entries = new();
         if (CurrentVersion != null)
@@ -224,8 +317,252 @@ public partial class ConditionalConfigSync
             entries.Add(PackageEntry.ServerVersion(CurrentVersion));
         }
 
-        entries.Add(PackageEntry.LockExempt(IsPeerAdmin(peer), PolicyChangeCapability));
+        entries.Add(PackageEntry.LockExempt(admin, PolicyChangeCapability));
         return ConfigsToPackage(allConfigs.Select(c => c.BaseConfig), allCustomValues, entries, partial: false);
+    }
+
+    private FullSyncSnapshotKey CaptureFullSyncSnapshotKey(bool admin)
+    {
+        return new FullSyncSnapshotKey(
+            fullSyncStateRevision,
+            admin,
+            CurrentVersion,
+            allConfigs.Count,
+            allCustomValues.Count,
+            lockedConfig);
+    }
+
+    private static bool FullSyncSnapshotMatches(FullSyncSnapshot snapshot, FullSyncSnapshotKey key)
+    {
+        return snapshot.Key.Equals(key);
+    }
+
+    private static string FormatSnapshotMeasurement(bool measured, double milliseconds)
+    {
+        return measured ? FormatMilliseconds(milliseconds) : "not measured";
+    }
+
+    private void InvalidateFullSyncSnapshot(string reason)
+    {
+        if (!isServer)
+        {
+            return;
+        }
+
+        if (fullSyncStateRevision == long.MaxValue)
+        {
+            fullSyncStateRevision = 1;
+        }
+        else
+        {
+            ++fullSyncStateRevision;
+        }
+
+        fullSyncAdminSnapshot = null;
+        fullSyncNonAdminSnapshot = null;
+        DebugLog(ConditionalConfigSyncDebugLevel.Trace, "Snapshot", $"Invalidated full-sync snapshot: revision={fullSyncStateRevision}, reason={reason}");
+    }
+
+    private void ResetFullSyncSnapshotCache(bool advanceRevision = true)
+    {
+        if (advanceRevision)
+        {
+            if (fullSyncStateRevision == long.MaxValue)
+            {
+                fullSyncStateRevision = 1;
+            }
+            else
+            {
+                ++fullSyncStateRevision;
+            }
+        }
+
+        fullSyncAdminSnapshot = null;
+        fullSyncNonAdminSnapshot = null;
+    }
+
+    private bool TryGetOrCreateFullSyncSnapshot(ZNetPeer peer, out FullSyncSnapshot? snapshot, out bool cacheHit)
+    {
+        for (int attempt = 1; attempt <= FullSyncSnapshotBuildAttempts; ++attempt)
+        {
+            FullSyncSnapshotKey key = CaptureFullSyncSnapshotKey(IsPeerAdmin(peer));
+            FullSyncSnapshot? cached = key.Admin ? fullSyncAdminSnapshot : fullSyncNonAdminSnapshot;
+            if (cached != null && FullSyncSnapshotMatches(cached, key))
+            {
+                snapshot = cached;
+                cacheHit = true;
+                DebugLog(
+                    ConditionalConfigSyncDebugLevel.Verbose,
+                    "Snapshot",
+                    $"Reusing full-sync snapshot: revision={cached.Key.Revision}, admin={cached.Key.Admin}, raw={FormatByteCount(cached.RawSize)}, " +
+                    $"wire={FormatByteCount(cached.WireSize)}, compressed={cached.Compressed}, " +
+                    $"buildSerialize={FormatSnapshotMeasurement(cached.SerializationMeasured, cached.SerializationMilliseconds)}, " +
+                    $"buildCompress={FormatSnapshotMeasurement(cached.CompressionMeasured, cached.CompressionMilliseconds)}");
+                return true;
+            }
+
+            bool measureSnapshot = ShouldDebugLog(ConditionalConfigSyncDebugLevel.Verbose);
+            long serializationStarted = measureSnapshot ? Stopwatch.GetTimestamp() : 0;
+            ZPackage rawPackage = CreateFullSyncPackageUncached(key.Admin);
+            double serializationMilliseconds = measureSnapshot ? ElapsedMilliseconds(serializationStarted) : 0d;
+            int rawSize = GameReflection.PackageSize(rawPackage);
+
+            ZPackage wirePackage = rawPackage;
+            bool compressed = false;
+            bool compressionMeasured = false;
+            double compressionMilliseconds = 0d;
+            if (rawSize <= maxPayloadSize && rawSize > compressMinSize)
+            {
+                long compressionStarted = measureSnapshot ? Stopwatch.GetTimestamp() : 0;
+                wirePackage = CompressPackage(rawPackage);
+                if (measureSnapshot)
+                {
+                    compressionMilliseconds = ElapsedMilliseconds(compressionStarted);
+                    compressionMeasured = true;
+                }
+                compressed = true;
+            }
+
+            FullSyncSnapshotKey completedKey = CaptureFullSyncSnapshotKey(IsPeerAdmin(peer));
+            if (!key.Equals(completedKey))
+            {
+                DebugLog(
+                    ConditionalConfigSyncDebugLevel.Verbose,
+                    "Snapshot",
+                    $"Discarded unstable full-sync snapshot build {attempt}/{FullSyncSnapshotBuildAttempts}: " +
+                    $"revision={key.Revision}->{completedKey.Revision}, admin={key.Admin}->{completedKey.Admin}, " +
+                    $"version='{key.ServerVersion}'->'{completedKey.ServerVersion}', configs={key.ConfigCount}->{completedKey.ConfigCount}, " +
+                    $"custom={key.CustomValueCount}->{completedKey.CustomValueCount}, locking={key.HasLockingConfig}->{completedKey.HasLockingConfig}");
+                continue;
+            }
+
+            int wireSize = GameReflection.PackageSize(wirePackage);
+            bool validPayload = rawSize <= maxPayloadSize && wireSize <= maxPayloadSize;
+            FullSyncSnapshot built = new()
+            {
+                Key = key,
+                RawSize = rawSize,
+                WireSize = wireSize,
+                Compressed = compressed,
+                SerializationMeasured = measureSnapshot,
+                CompressionMeasured = compressionMeasured,
+                SerializationMilliseconds = serializationMilliseconds,
+                CompressionMilliseconds = compressionMilliseconds,
+                // Avoid a second large allocation for a snapshot that will be rejected by the existing payload limits.
+                WireBytes = validPayload ? GameReflection.PackageGetArray(wirePackage) : Array.Empty<byte>(),
+            };
+
+            string compressionDetails = compressed
+                ? FormatCompressionStats(rawSize, wireSize)
+                : $"raw={FormatByteCount(rawSize)}, wire={FormatByteCount(wireSize)}, compression=not-used";
+            DebugLog(
+                ConditionalConfigSyncDebugLevel.Verbose,
+                "Snapshot",
+                $"Built full-sync snapshot: revision={built.Key.Revision}, admin={built.Key.Admin}, configs={built.Key.ConfigCount}, custom={built.Key.CustomValueCount}, " +
+                $"{compressionDetails}, serialize={FormatSnapshotMeasurement(built.SerializationMeasured, built.SerializationMilliseconds)}, " +
+                $"compress={FormatSnapshotMeasurement(built.CompressionMeasured, built.CompressionMilliseconds)}");
+
+            if (validPayload)
+            {
+                if (key.Admin)
+                {
+                    fullSyncAdminSnapshot = built;
+                }
+                else
+                {
+                    fullSyncNonAdminSnapshot = built;
+                }
+            }
+
+            snapshot = built;
+            cacheHit = false;
+            return true;
+        }
+
+        snapshot = null;
+        cacheHit = false;
+        return false;
+    }
+
+    private IEnumerator SendFullSyncPackage(ZNetPeer peer, string area, string action)
+    {
+        FullSyncSnapshot? snapshot;
+        bool cacheHit;
+        while (!TryGetOrCreateFullSyncSnapshot(peer, out snapshot, out cacheHit))
+        {
+            DebugLog(
+                ConditionalConfigSyncDebugLevel.Verbose,
+                "Snapshot",
+                $"Full-sync state changed during all {FullSyncSnapshotBuildAttempts} build attempts; waiting for {FullSyncSnapshotStableFrames} stable frames before retrying.");
+
+            FullSyncSnapshotKey observedKey = CaptureFullSyncSnapshotKey(IsPeerAdmin(peer));
+            int stableFrames = 0;
+            while (stableFrames < FullSyncSnapshotStableFrames)
+            {
+                yield return null;
+                if (!sessionActive || !GameReflection.HasZNet || !GameReflection.IsPeerReady(peer))
+                {
+                    yield break;
+                }
+
+                FullSyncSnapshotKey currentKey = CaptureFullSyncSnapshotKey(IsPeerAdmin(peer));
+                if (currentKey.Equals(observedKey))
+                {
+                    ++stableFrames;
+                }
+                else
+                {
+                    observedKey = currentKey;
+                    stableFrames = 0;
+                }
+            }
+        }
+
+        DebugLog(
+            ConditionalConfigSyncDebugLevel.Basic,
+            area,
+            $"{action} {FormatPeer(peer)}, admin={snapshot!.Key.Admin}, configs={snapshot.Key.ConfigCount}, custom={snapshot.Key.CustomValueCount}, " +
+            $"raw={FormatByteCount(snapshot.RawSize)}, wire={FormatByteCount(snapshot.WireSize)}, " +
+            $"snapshot={(cacheHit ? "reused" : "built")}, revision={snapshot.Key.Revision}");
+
+        if (snapshot.RawSize > maxPayloadSize)
+        {
+            RejectSync(
+                $"Rejected outgoing synchronization package: serialized payload is {snapshot.RawSize} bytes, limit is {maxPayloadSize} bytes.",
+                null,
+                incoming: false);
+            yield break;
+        }
+        if (snapshot.WireSize > maxPayloadSize)
+        {
+            RejectSync(
+                $"Rejected outgoing prepared package: payload is {snapshot.WireSize} bytes, limit is {maxPayloadSize} bytes.",
+                null,
+                incoming: false);
+            yield break;
+        }
+
+        IEnumerator sender = SendZPackage(
+            new List<ZNetPeer> { peer },
+            GameReflection.NewPackage(snapshot.WireBytes),
+            packagePrepared: true,
+            rawSizeHint: snapshot.RawSize);
+        try
+        {
+            while (sender.MoveNext())
+            {
+                yield return sender.Current;
+            }
+        }
+        finally
+        {
+            (sender as IDisposable)?.Dispose();
+        }
+    }
+
+    private void StartFullSyncPackage(ZNetPeer peer, string area, string action)
+    {
+        GameReflection.StartCoroutine(SendFullSyncPackage(peer, area, action));
     }
 
     private void ScheduleLateRegistrationSync(OwnConfigEntryBase? config = null, CustomSyncedValueBase? customValue = null)
@@ -309,6 +646,8 @@ public partial class ConditionalConfigSync
         lateRegisteredCustomValues.Clear();
         lateRegistrationSyncScheduled = false;
         authoritativeCorrectionTimes.Clear();
+        largeStringCustomValueWarnings.Clear();
+        ResetFullSyncSnapshotCache();
     }
 
     private static bool IsProtocolCompatible(int remoteProtocol)
