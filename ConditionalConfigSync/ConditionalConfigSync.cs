@@ -354,12 +354,14 @@ public partial class ConditionalConfigSync
             .SetValue(configEntry, description);
 
         allConfigs.Add(syncedEntry);
-        if (observedConfigFiles.Add(configEntry.ConfigFile))
+        if (!observedConfigFiles.Add(configEntry.ConfigFile))
         {
-            // BepInEx isolates ConfigFile subscribers, but ConfigEntry<T>.SettingChanged is one multicast
-            // callback inside that dispatch. An earlier typed subscriber must not hide changes from CCS.
-            configEntry.ConfigFile.SettingChanged += OnObservedConfigFileChanged;
+            configEntry.ConfigFile.SettingChanged -= OnObservedConfigFileChanged;
         }
+        // BepInEx isolates ConfigFile subscribers, but ConfigEntry<T>.SettingChanged is one multicast
+        // callback inside that dispatch. Keep our independent observer after newly bound entries'
+        // typed forwarders so existing normalization callbacks run before their values are published.
+        configEntry.ConfigFile.SettingChanged += OnObservedConfigFileChanged;
         InvalidateFullSyncSnapshot($"registered config: {definition.Section} -> {definition.Key}");
 
         bool applyLoadedPolicy = IsSourceOfTruth && isServer && GameReflection.HasZNet && policySupportInitialized;
