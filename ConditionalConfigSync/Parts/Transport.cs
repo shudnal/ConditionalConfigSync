@@ -28,7 +28,13 @@ public partial class ConditionalConfigSync
 
     private sealed class PendingSequencedPackage
     {
+        internal readonly SendSlot Reservation;
         internal ZPackage? Package;
+
+        internal PendingSequencedPackage(SendSlot reservation)
+        {
+            Reservation = reservation;
+        }
     }
 
     private readonly LinkedList<PendingSequencedPackage> pendingSequencedCustomValuePackages = new();
@@ -97,7 +103,7 @@ public partial class ConditionalConfigSync
 
         if (ShouldDeferOutgoingBroadcasts)
         {
-            pendingConfigBroadcasts.Add(configEntry);
+            QueuePendingConfigBroadcast(configEntry);
             DebugLog(ConditionalConfigSyncDebugLevel.Verbose, "ConfigChanged", $"Queued {configEntry.Definition.Section}/{configEntry.Definition.Key}, processing={IsProcessing}, sending={IsSending}");
             return;
         }
@@ -163,7 +169,7 @@ public partial class ConditionalConfigSync
             }
             else
             {
-                pendingCustomValueBroadcasts.Add(customValue);
+                QueuePendingCustomValueBroadcast(customValue);
                 DebugLog(ConditionalConfigSyncDebugLevel.Verbose, "CustomValue", $"Queued latest-state {customValue.Identifier}, priority={customValue.Priority}");
             }
             return;
@@ -365,22 +371,26 @@ public partial class ConditionalConfigSync
 
     private bool TryEnqueueSequencedPackage(Func<ZPackage> createPackage, string identifier)
     {
-        if (pendingSequencedCustomValuePackages.Count + waitingSequencedSendCount >= maxPendingSequencedUpdates)
+        if (waitingSequencedSendCount >= maxPendingSequencedUpdates)
         {
             RejectSync($"Rejected newest sequenced custom value '{identifier}': pending queue already contains {maxPendingSequencedUpdates} events.", null, incoming: false);
             return false;
         }
 
-        // Reserve before calling a consumer serializer. Reentrant notifications must be placed after
-        // this event, even when their smaller payload finishes serialization first.
-        LinkedListNode<PendingSequencedPackage> node = pendingSequencedCustomValuePackages.AddLast(new PendingSequencedPackage());
-        long generation = transportGeneration;
+        // Reserve in the shared FIFO now, not at flush time. An earlier state marker stays ahead
+        // of this event, and reentrant notifications remain behind it during serialization.
+        SendSlot? reservation = ReserveSendSlot(sequenced: true);
+        if (reservation == null)
+        {
+            return false;
+        }
+        LinkedListNode<PendingSequencedPackage> node = pendingSequencedCustomValuePackages.AddLast(new PendingSequencedPackage(reservation));
         ++packagePreparationDepth;
         try
         {
             ZPackage package = createPackage();
             int size = GameReflection.PackageSize(package);
-            if (generation != transportGeneration || !sessionActive)
+            if (!IsCurrentSend(reservation))
             {
                 return false;
             }
@@ -401,9 +411,13 @@ public partial class ConditionalConfigSync
         finally
         {
             --packagePreparationDepth;
-            if (node.Value.Package == null && node.List == pendingSequencedCustomValuePackages)
+            if (node.Value.Package == null)
             {
-                pendingSequencedCustomValuePackages.Remove(node);
+                if (node.List == pendingSequencedCustomValuePackages)
+                {
+                    pendingSequencedCustomValuePackages.Remove(node);
+                }
+                ReleaseSendSlot(reservation);
             }
         }
     }
@@ -1406,7 +1420,7 @@ public partial class ConditionalConfigSync
             {
                 if (GetConfigData(config) is { } data && ShouldBroadcastConfigChange(data))
                 {
-                    pendingConfigBroadcasts.Add(config);
+                    QueuePendingConfigBroadcast(config);
                 }
             }
             return;
@@ -1433,7 +1447,7 @@ public partial class ConditionalConfigSync
                 }
                 else
                 {
-                    pendingCustomValueBroadcasts.Add(customValue);
+                    QueuePendingCustomValueBroadcast(customValue);
                 }
             }
             FlushPendingBroadcastsForAllIfIdle();
@@ -1517,14 +1531,13 @@ public partial class ConditionalConfigSync
         {
             if (!IsSourceOfTruth && InitialSyncDone)
             {
-                pendingConfigBroadcasts.Clear();
-                pendingCustomValueBroadcasts.Clear();
-                pendingSequencedCustomValuePackages.Clear();
+                ClearPendingBroadcasts();
             }
             return;
         }
 
-        if (pendingSequencedCustomValuePackages.Count == 0 && pendingConfigBroadcasts.Count == 0 && pendingCustomValueBroadcasts.Count == 0)
+        if (pendingSequencedCustomValuePackages.Count == 0
+            && (pendingStateSendSlot == null || sendQueue.First != pendingStateSendSlot.Node))
         {
             return;
         }
@@ -1533,45 +1546,23 @@ public partial class ConditionalConfigSync
         DebugLog(ConditionalConfigSyncDebugLevel.Basic, "Pending", $"Flushing configs={pendingConfigBroadcasts.Count}, custom={pendingCustomValueBroadcasts.Count}, sequenced={pendingSequencedCustomValuePackages.Count}");
         try
         {
-            // Transfer captured events into the FIFO even while another package is sending.
-            // Latest-state values remain coalesced until the current send queue is drained.
+            // State and events already own their FIFO positions. Materializing one cannot move it
+            // behind a later reservation, even while an earlier fragmented send is still active.
+            FlushPendingStateBroadcastIfReady();
             int sequenceCount = pendingSequencedCustomValuePackages.Count;
             for (int index = 0; index < sequenceCount; ++index)
             {
-                if (pendingSequencedCustomValuePackages.First?.Value.Package is not { } package)
+                if (pendingSequencedCustomValuePackages.First is not { } node || node.Value.Package is not { } package)
                 {
                     break;
                 }
                 pendingSequencedCustomValuePackages.RemoveFirst();
-                StartBroadcastPackage(GameReflection.Everybody, package, sequenced: true);
+                StartBroadcastPackage(GameReflection.Everybody, () => package,
+                    sequenced: true, reservation: node.Value.Reservation);
             }
 
-            if (!IsSending && pendingConfigBroadcasts.Count > 0)
-            {
-                ConfigEntryBase[] configs = pendingConfigBroadcasts.Where(config => GetConfigData(config) is { } data && ShouldBroadcastConfigChange(data)).ToArray();
-                pendingConfigBroadcasts.Clear();
-                if (configs.Length > 0 && !StartBroadcastPackage(GameReflection.Everybody, () => ConfigsToPackage(configs: configs, includeConfigStates: isServer)))
-                {
-                    // A failing converter must not discard unrelated healthy entries in the batch.
-                    foreach (ConfigEntryBase config in configs)
-                    {
-                        StartBroadcastPackage(GameReflection.Everybody, () => ConfigsToPackage(configs: new[] { config }, includeConfigStates: isServer));
-                    }
-                }
-            }
-
-            if (!IsSending && pendingCustomValueBroadcasts.Count > 0)
-            {
-                CustomSyncedValueBase[] values = pendingCustomValueBroadcasts.OrderByDescending(v => v.Priority).ThenBy(v => v.RegistrationIndex).ToArray();
-                pendingCustomValueBroadcasts.Clear();
-                if (values.Length > 0 && !StartBroadcastPackage(GameReflection.Everybody, () => ConfigsToPackage(customValues: values)))
-                {
-                    foreach (CustomSyncedValueBase value in values)
-                    {
-                        StartBroadcastPackage(GameReflection.Everybody, () => ConfigsToPackage(customValues: new[] { value }));
-                    }
-                }
-            }
+            // A short earlier event may have completed synchronously and exposed the state marker.
+            FlushPendingStateBroadcastIfReady();
         }
         finally
         {

@@ -154,6 +154,12 @@ public partial class ConditionalConfigSync
         Dictionary<ConfigFile, bool> saveOnConfigSet = new();
         List<PolicyStateChangedEventArgs> policyTransitions = new();
 
+        if (retainedSnapshot == null)
+        {
+            // Optional-server fallback also abandons deferred publications without ending ZNet.
+            ClearPendingBroadcasts();
+        }
+
         // Value callbacks must already see local ownership, but SourceOfTruthChanged must still run
         // after restoration. Both shutdown and optional-server fallback use this reset path.
         bool restoredLocalOwnership = retainedSnapshot == null && !isSourceOfTruth;
