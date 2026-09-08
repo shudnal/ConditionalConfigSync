@@ -234,13 +234,13 @@ public class SyncedConfigEntry<T> : OwnConfigEntryBase
     [Description("Updates the local fallback without overwriting an active server value on a client.")]
     public void AssignLocalValue(T value)
     {
-        if (!HasLocalBaseValue)
+        if (ConditionalConfigSync.ShouldStoreLocalConfigValue(this))
         {
-            Value = value;
+            StoreLocalBaseValue(value);
         }
         else
         {
-            StoreLocalBaseValue(value);
+            Value = value;
         }
     }
 }
