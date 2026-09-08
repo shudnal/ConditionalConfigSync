@@ -22,7 +22,7 @@ public static class PluginSelfInfo
     /// Package and assembly version. Update this single value for a new release.
     /// The Thunderstore manifest reads the compiled plugin assembly version during packaging.
     /// </summary>
-    public const string PluginVersion = "1.0.4";
+    public const string PluginVersion = "1.0.5";
 
     /// <summary>
     /// Current ConditionalConfigSync wire protocol version.

@@ -33,6 +33,13 @@
           SkipUnchangedFiles="true" />
   </Target>
 
+  <Target Name="CopyConditionalConfigSyncPluginReference" AfterTargets="Build">
+    <MakeDir Directories="$(ManagersAssembliesPath)" />
+    <Copy SourceFiles="$(TargetPath)"
+          DestinationFolder="$(ManagersAssembliesPath)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
   <!-- Thunderstore.targets is an MSBuild import, not a regular project item.
        Removing it from the SDK default None glob prevents Visual Studio CPS from
        trying to represent the same file as both ProjectImport and FileOnDisk. -->

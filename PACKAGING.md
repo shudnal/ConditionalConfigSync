@@ -44,6 +44,16 @@ ConditionalConfigSync.Plugin.dll
 ConditionalConfigSync.dll
 ```
 
+Normal project builds also refresh the shared manager/reference directory configured by `ManagersAssembliesPath` (default `D:\work\source\repos\Assemblies\Managers`):
+
+```text
+ConditionalConfigSync.dll
+ConditionalConfigSync.xml
+ConditionalConfigSync.Plugin.dll
+```
+
+The core project owns copying `ConditionalConfigSync.dll` and its XML documentation. The plugin project separately copies `ConditionalConfigSync.Plugin.dll`; keep both build targets when changing project/packaging files.
+
 The shared `API` directory is outside this repository, one level above the repository root.
 
 ## GitHub release files
@@ -63,4 +73,3 @@ The build stages files that are not specific to Thunderstore in `ConditionalConf
 The build copies both license files to GitHub release staging. It does not add or remove them in the Thunderstore staging directory, so manually maintained Thunderstore contents are left intact.
 
 Repository: <https://github.com/shudnal/ConditionalConfigSync>
-
