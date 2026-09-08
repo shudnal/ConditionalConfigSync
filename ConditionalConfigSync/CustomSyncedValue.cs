@@ -96,6 +96,19 @@ public abstract class CustomSyncedValueBase
     private object? boxedValue;
     private bool hasBoxedValue;
 
+    internal void InitializeBoxedValue(object? value)
+    {
+        // Registration is already scheduled by the base constructor. Initial local data is not a
+        // publication, even for an administrator or a sequenced value registered during a session.
+        boxedValue = value;
+        hasBoxedValue = true;
+        StoreLastAcceptedValue(value);
+        if (!localIsOwner)
+        {
+            StoreLocalBaseValue(value);
+        }
+    }
+
     /// <summary>
     /// Gets or sets the active value through the non-generic API.
     /// </summary>
@@ -264,8 +277,7 @@ public class CustomSyncedValue<T> : CustomSyncedValueBase
     public CustomSyncedValue(ConditionalConfigSync configSync, string identifier, T value = default!, int priority = 0, IEqualityComparer<T>? valueComparer = null) : base(configSync, identifier, typeof(T), priority)
     {
         this.valueComparer = valueComparer ?? EqualityComparer<T>.Default;
-        Value = value;
-        StoreLastAcceptedValue(BoxedValue);
+        InitializeBoxedValue(value);
     }
 
     /// <summary>
@@ -380,8 +392,8 @@ public sealed class SequencedCustomSyncedValue<T> : CustomSyncedValue<T>
     /// <summary>
     /// Creates an event-like custom synchronized value that preserves every assignment.
     /// </summary>
-    /// <param name="configSync">The synchronization instance that owns this value.</param>
-    /// <param name="identifier">A unique stable name within <paramref name="configSync"/>.</param>
+    /// <param name="configSync">The synchronization instance that owns the value.</param>
+    /// <param name="identifier">A unique stable name within the synchronization instance.</param>
     /// <param name="value">Initial local payload value.</param>
     /// <param name="priority">Batch ordering priority. Higher values come first.</param>
     /// <param name="valueComparer">
