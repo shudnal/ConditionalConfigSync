@@ -49,11 +49,8 @@ public partial class ConditionalConfigSync
 
     internal static bool ShouldStoreLocalConfigValue(OwnConfigEntryBase config)
     {
-        if (config.HasLocalBaseValue)
-        {
-            return true;
-        }
-
+        // An old fallback may still exist while a policy/reset callback is running. Only current
+        // ownership decides whether AssignLocalValue targets the fallback or the active local value.
         ConditionalConfigSync? owner = GetOwningConfigSync(config);
         return owner != null && !owner.IsSourceOfTruth && config.IsServerControlled;
     }
@@ -157,6 +154,18 @@ public partial class ConditionalConfigSync
         Dictionary<ConfigFile, bool> saveOnConfigSet = new();
         List<PolicyStateChangedEventArgs> policyTransitions = new();
 
+        // Value callbacks must already see local ownership, but SourceOfTruthChanged must still run
+        // after restoration. Both shutdown and optional-server fallback use this reset path.
+        bool restoredLocalOwnership = retainedSnapshot == null && !isSourceOfTruth;
+        if (restoredLocalOwnership)
+        {
+            isSourceOfTruth = true;
+            foreach (CustomSyncedValueBase customValue in allCustomValues)
+            {
+                customValue.SetLocalOwnership(true);
+            }
+        }
+
         // During a full resync, entries present in the new snapshot keep their active values and
         // local fallbacks until ApplyParsedConfigs applies the replacement. Only absent entries reset.
         // Snapshot the registration sets before invoking consumer callbacks, which may add entries.
@@ -164,6 +173,27 @@ public partial class ConditionalConfigSync
             || (!retainedSnapshot.configValues.ContainsKey(config) && !retainedSnapshot.configStates.ContainsKey(config))).ToArray();
         CustomSyncedValueBase[] resetCustomValues = allCustomValues.Where(config => retainedSnapshot == null
             || !retainedSnapshot.customValues.ContainsKey(config)).ToArray();
+
+        foreach (OwnConfigEntryBase config in resetConfigs)
+        {
+            bool oldServerControlled = config.IsServerControlled;
+            bool oldHidden = config.IsHidden;
+            bool newServerControlled = GetDefaultServerControlled(config);
+            config.ClearServerValue();
+            config.IsServerControlled = newServerControlled;
+            config.IsHidden = false;
+            config.IsPolicyStateInitialized = false;
+            if (oldServerControlled != newServerControlled || oldHidden)
+            {
+                policyTransitions.Add(new PolicyStateChangedEventArgs(
+                    config,
+                    oldServerControlled,
+                    newServerControlled,
+                    oldHidden,
+                    false,
+                    "server connection reset"));
+            }
+        }
 
         try
         {
@@ -176,16 +206,21 @@ public partial class ConditionalConfigSync
                     configFile.SaveOnConfigSet = false;
                 }
 
+                // Detach only the fallback being restored. A callback may establish a new one.
+                object? localValue = config.LocalBaseValue;
+                config.ClearLocalBaseValue();
                 configsBeingApplied.Add(config.BaseConfig);
                 try
                 {
-                    config.BaseConfig.BoxedValue = config.LocalBaseValue;
+                    config.BaseConfig.BoxedValue = localValue;
                     config.StoreLastAcceptedValue(config.BaseConfig.BoxedValue);
-                    config.ClearLocalBaseValue();
-                    config.ClearServerValue();
                 }
                 catch (Exception e)
                 {
+                    if (!config.HasLocalBaseValue)
+                    {
+                        config.StoreLocalBaseValue(localValue);
+                    }
                     ConfigDefinition definition = config.BaseConfig.Definition;
                     DebugWarning("Reset", $"Failed to restore local config {definition.Section} -> {definition.Key}; continuing. Error: {e}");
                 }
@@ -205,37 +240,25 @@ public partial class ConditionalConfigSync
 
         foreach (OwnConfigEntryBase config in resetConfigs)
         {
-            bool oldServerControlled = config.IsServerControlled;
-            bool oldHidden = config.IsHidden;
-            bool newServerControlled = GetDefaultServerControlled(config);
-            config.ClearServerValue();
-            config.IsServerControlled = newServerControlled;
-            config.IsHidden = false;
-            config.IsPolicyStateInitialized = false;
             config.StoreLastAcceptedValue(config.BaseConfig.BoxedValue);
-            if (oldServerControlled != newServerControlled || oldHidden)
-            {
-                policyTransitions.Add(new PolicyStateChangedEventArgs(
-                    config,
-                    oldServerControlled,
-                    newServerControlled,
-                    oldHidden,
-                    false,
-                    "server connection reset"));
-            }
         }
 
         foreach (CustomSyncedValueBase config in resetCustomValues.Where(config => config.HasLocalBaseValue))
         {
+            object? localValue = config.LocalBaseValue;
+            config.ClearLocalBaseValue();
             customValuesBeingApplied.Add(config);
             try
             {
-                config.BoxedValue = config.LocalBaseValue;
+                config.BoxedValue = localValue;
                 config.StoreLastAcceptedValue(config.BoxedValue);
-                config.ClearLocalBaseValue();
             }
             catch (Exception e)
             {
+                if (!config.HasLocalBaseValue)
+                {
+                    config.StoreLocalBaseValue(localValue);
+                }
                 DebugWarning("Reset", $"Failed to restore local custom value '{config.Identifier}'; continuing. Error: {e}");
             }
             finally
@@ -248,6 +271,10 @@ public partial class ConditionalConfigSync
         foreach (PolicyStateChangedEventArgs transition in policyTransitions)
         {
             RaisePolicyStateEvents(transition);
+        }
+        if (restoredLocalOwnership)
+        {
+            InvokeEventHandlers(SourceOfTruthChanged, true, nameof(SourceOfTruthChanged));
         }
     }
 
@@ -293,7 +320,10 @@ public partial class ConditionalConfigSync
     {
         internal static bool Prefix(ConfigEntryBase __instance, ref string __result)
         {
-            if (GetConfigData(__instance) is not { } data || IsWritableConfig(data))
+            // Edit permission does not transfer ownership of a server value to an administrator's
+            // local cfg file. Persist an existing local fallback for every server-controlled replica.
+            if (GetConfigData(__instance) is not { } data
+                || IsWritableConfig(data) && !(data.HasLocalBaseValue && ShouldStoreLocalConfigValue(data)))
             {
                 return true;
             }
