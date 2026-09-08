@@ -143,6 +143,11 @@ public partial class ConditionalConfigSync
             if (value != isSourceOfTruth)
             {
                 isSourceOfTruth = value;
+                foreach (CustomSyncedValueBase customValue in allCustomValues)
+                {
+                    customValue.SetLocalOwnership(value);
+                }
+                ServerLockedSettingChanged();
                 InvokeEventHandlers(SourceOfTruthChanged, value, nameof(SourceOfTruthChanged));
             }
         }
@@ -235,6 +240,8 @@ public partial class ConditionalConfigSync
     private static readonly HashSet<ConditionalConfigSync> configSyncs = new();
 
     private readonly HashSet<OwnConfigEntryBase> allConfigs = new();
+
+    private readonly HashSet<ConfigFile> observedConfigFiles = new();
 
     private HashSet<CustomSyncedValueBase> allCustomValues = new();
 
@@ -333,15 +340,26 @@ public partial class ConditionalConfigSync
         };
         syncedEntry.StoreLastAcceptedValue(configEntry.BoxedValue);
 
-        AccessTools.DeclaredField(typeof(ConfigDescription), "<Tags>k__BackingField").SetValue(
-            configEntry.Description,
-            new object[] { new ConfigurationManagerAttributes() }
-                .Concat(configEntry.Description.Tags ?? Array.Empty<object>())
-                .Concat(new[] { syncedEntry })
-                .ToArray());
+        // ConfigDescription, including ConfigDescription.Empty, may be shared by unrelated entries.
+        // Attach an entry-specific description rather than modifying the caller's shared tag array.
+        ConfigDescription originalDescription = configEntry.Description;
+        object[] tags = new object[] { new ConfigurationManagerAttributes() }
+            .Concat((originalDescription.Tags ?? Array.Empty<object>())
+                .Where(tag => tag is not OwnConfigEntryBase && tag is not ConfigurationManagerAttributes))
+            .Concat(new[] { syncedEntry })
+            .ToArray();
+        ConfigDescription description = new(originalDescription.Description, originalDescription.AcceptableValues, tags);
+        (AccessTools.DeclaredField(typeof(ConfigEntryBase), "<Description>k__BackingField")
+            ?? throw new MissingFieldException(typeof(ConfigEntryBase).FullName, "<Description>k__BackingField"))
+            .SetValue(configEntry, description);
 
-        configEntry.SettingChanged += (_, _) => OnConfigEntryChanged(configEntry, syncedEntry);
         allConfigs.Add(syncedEntry);
+        if (observedConfigFiles.Add(configEntry.ConfigFile))
+        {
+            // BepInEx isolates ConfigFile subscribers, but ConfigEntry<T>.SettingChanged is one multicast
+            // callback inside that dispatch. An earlier typed subscriber must not hide changes from CCS.
+            configEntry.ConfigFile.SettingChanged += OnObservedConfigFileChanged;
+        }
         InvalidateFullSyncSnapshot($"registered config: {definition.Section} -> {definition.Key}");
 
         bool applyLoadedPolicy = IsSourceOfTruth && isServer && GameReflection.HasZNet && policySupportInitialized;
@@ -357,6 +375,29 @@ public partial class ConditionalConfigSync
             $"Added config {definition.Section}/{definition.Key}, type={configEntry.SettingType.Name}, mode={syncMode}, default={(normalizedDefault ? "ServerControlled" : "ClientControlled")}");
         ScheduleLateRegistrationSync(config: syncedEntry);
         return syncedEntry;
+    }
+
+    private void OnObservedConfigFileChanged(object? sender, SettingChangedEventArgs args)
+    {
+        if (GetConfigData(args.ChangedSetting) is { } data && allConfigs.Contains(data))
+        {
+            OnObservedConfigChange(args.ChangedSetting, data);
+        }
+    }
+
+    private void OnObservedConfigChange(ConfigEntryBase configEntry, OwnConfigEntryBase data)
+    {
+        try
+        {
+            OnConfigEntryChanged(configEntry, data);
+        }
+        finally
+        {
+            if (ReferenceEquals(data, lockedConfig))
+            {
+                LockedConfigChanged?.Invoke();
+            }
+        }
     }
 
     /// <summary>Binds and registers a Conditional config in one call using a text description and explicit default ownership.</summary>
@@ -477,9 +518,11 @@ public partial class ConditionalConfigSync
         lockedConfig.IsServerControlled = true;
         lockedConfig.IsPolicyStateInitialized = IsSourceOfTruth && isServer && GameReflection.HasZNet && policySupportInitialized;
         lockedConfig.StoreLastAcceptedValue(lockingConfig.BoxedValue);
-        lockingConfig.SettingChanged += (_, _) => LockedConfigChanged?.Invoke();
         LockedConfigChanged -= ServerLockedSettingChanged;
         LockedConfigChanged += ServerLockedSettingChanged;
+        InvalidateFullSyncSnapshot("registered locking config");
+        ServerLockedSettingChanged();
+        ScheduleLateRegistrationSync(config: lockedConfig);
 
         return (SyncedConfigEntry<T>)lockedConfig;
     }
@@ -497,5 +540,10 @@ public partial class ConditionalConfigSync
         customValue.ValueChanged += () => OnCustomValueChanged(customValue);
         DebugLog(ConditionalConfigSyncDebugLevel.Trace, "Register", $"Added custom value {customValue.Identifier}, type={customValue.Type.Name}, priority={customValue.Priority}, sequenced={customValue.PreserveUpdateSequence}");
         ScheduleLateRegistrationSync(customValue: customValue);
+    }
+
+    internal void ReportCustomValueSubscriberFailure(string identifier, Exception exception)
+    {
+        DebugWarning("CustomValue", $"ValueChanged subscriber for '{identifier}' failed; continuing with the remaining subscribers. Error: {exception}");
     }
 }
