@@ -113,8 +113,13 @@ public partial class ConditionalConfigSync
         try
         {
             EnsureConfigDirectory();
-            syncPolicyWatcher ??= CreatePolicyWatcher(SyncPolicyFileName);
-            hiddenConfigsWatcher ??= CreatePolicyWatcher(HiddenConfigsFileName);
+            lock (policyLock)
+            {
+                syncPolicyWatcher ??= CreatePolicyWatcher(SyncPolicyFileName);
+                hiddenConfigsWatcher ??= CreatePolicyWatcher(HiddenConfigsFileName);
+                syncPolicyWatcher.EnableRaisingEvents = true;
+                hiddenConfigsWatcher.EnableRaisingEvents = true;
+            }
         }
         catch (Exception e)
         {
@@ -127,59 +132,100 @@ public partial class ConditionalConfigSync
         FileSystemWatcher watcher = new(ConfigDirectoryPath, fileName)
         {
             NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime | NotifyFilters.FileName,
-            EnableRaisingEvents = true,
         };
-        watcher.Changed += (_, _) => SchedulePolicyReload();
-        watcher.Created += (_, _) => SchedulePolicyReload();
-        watcher.Renamed += (_, _) => SchedulePolicyReload();
-        watcher.Deleted += (_, _) => SchedulePolicyReload();
+        watcher.Changed += (_, _) => SchedulePolicyReload(watcher);
+        watcher.Created += (_, _) => SchedulePolicyReload(watcher);
+        watcher.Renamed += (_, _) => SchedulePolicyReload(watcher);
+        watcher.Deleted += (_, _) => SchedulePolicyReload(watcher);
         return watcher;
     }
 
-    private static void SchedulePolicyReload()
+    private static void SchedulePolicyReload(FileSystemWatcher watcher)
     {
-        long generation;
+        FileSystemWatcher? expectedSyncWatcher;
+        FileSystemWatcher? expectedHiddenWatcher;
         lock (policyLock)
         {
+            if (!policySupportInitialized
+                || !ReferenceEquals(watcher, syncPolicyWatcher) && !ReferenceEquals(watcher, hiddenConfigsWatcher))
+            {
+                return;
+            }
+
+            // Mark every event, including events received while a worker is already reading.
+            // Otherwise an edit to the first file while the second file is read can be lost forever.
+            Interlocked.Increment(ref policyReadGeneration);
             if (policyReloadScheduled)
             {
                 return;
             }
             policyReloadScheduled = true;
-            generation = ++policyReadGeneration;
+            expectedSyncWatcher = syncPolicyWatcher;
+            expectedHiddenWatcher = hiddenConfigsWatcher;
+        }
+
+        bool IsCurrentWatcherSession()
+        {
+            return policySupportInitialized
+                && ReferenceEquals(expectedSyncWatcher, syncPolicyWatcher)
+                && ReferenceEquals(expectedHiddenWatcher, hiddenConfigsWatcher);
         }
 
         ThreadPool.QueueUserWorkItem(_ =>
         {
-            Thread.Sleep(500);
-            if (!TryReadPolicyFiles(
+            for (;;)
+            {
+                Thread.Sleep(500);
+                long generation;
+                lock (policyLock)
+                {
+                    if (!IsCurrentWatcherSession())
+                    {
+                        return;
+                    }
+                    generation = Interlocked.Read(ref policyReadGeneration);
+                }
+
+                bool read = TryReadPolicyFiles(
                     createIfMissing: false,
                     out Dictionary<string, ConfigPolicyOverride> newSyncPolicy,
                     out HashSet<string> newHiddenPolicy,
                     out List<SyncPolicyRecord> syncRecords,
                     out List<HiddenPolicyRecord> hiddenRecords,
-                    out string? error))
-            {
+                    out string? error);
+
                 lock (policyLock)
                 {
+                    if (!IsCurrentWatcherSession())
+                    {
+                        return;
+                    }
+                    if (generation != Interlocked.Read(ref policyReadGeneration))
+                    {
+                        continue;
+                    }
                     policyReloadScheduled = false;
                 }
-                LogSource.LogWarning($"[Policy] Failed to read policy files: {error}");
+
+                if (!read)
+                {
+                    LogSource.LogWarning($"[Policy] Failed to read policy files: {error}");
+                    return;
+                }
+
+                EnqueueMainThread(() => ApplyPolicyFiles(
+                    newSyncPolicy, newHiddenPolicy, syncRecords, hiddenRecords,
+                    quiet: false, source: "policy file watcher", generation: generation));
                 return;
             }
-
-            lock (policyLock)
-            {
-                policyReloadScheduled = false;
-            }
-
-            EnqueueMainThread(() =>
-                ApplyPolicyFiles(newSyncPolicy, newHiddenPolicy, syncRecords, hiddenRecords, quiet: false, source: "policy file watcher", generation: generation));
         });
     }
 
     private static bool LoadPolicyFiles(bool createIfMissing, bool quiet, string source)
     {
+        // Allocate the generation before I/O. A manual read must not label stale contents as newer
+        // than a watcher read or a synchronous read performed by the next network session.
+        long generation = Interlocked.Increment(ref policyReadGeneration);
         if (!TryReadPolicyFiles(
                 createIfMissing,
                 out Dictionary<string, ConfigPolicyOverride> newSyncPolicy,
@@ -192,7 +238,6 @@ public partial class ConditionalConfigSync
             return false;
         }
 
-        long generation = Interlocked.Increment(ref policyReadGeneration);
         if (IsMainThread)
         {
             ApplyPolicyFiles(newSyncPolicy, newHiddenPolicy, syncRecords, hiddenRecords, quiet, source, generation);
@@ -251,9 +296,8 @@ public partial class ConditionalConfigSync
     {
         lock (policyLock)
         {
-            // A policy snapshot can remain queued while ZNet is shutting down. Ignore it when a newer
-            // snapshot was already read and applied during the next server initialization.
-            if (generation < policyAppliedGeneration)
+            // Ignore both old-session work and snapshots superseded while waiting for the main thread.
+            if (generation < policyAppliedGeneration || generation != Interlocked.Read(ref policyReadGeneration))
             {
                 return;
             }
@@ -281,7 +325,7 @@ public partial class ConditionalConfigSync
         {
             File.WriteAllText(SyncPolicyPath,
                 "# ConditionalConfigSync sync policy. Server-side only.\n" +
-                "# Exact setting: + ModGuid.Section.Key or - ModGuid.Section.Key\n" +
+                "# Exact setting: + ModGuid.Section.Key or - ModGuid.Section\n".Replace("- ModGuid.Section\n", "- ModGuid.Section.Key\n") +
                 "# Whole section: + ModGuid.Section or - ModGuid.Section\n" +
                 "# + forces server-controlled; - forces client-controlled.\n" +
                 "# Exact-setting rules take precedence over section rules.\n" +
@@ -362,7 +406,7 @@ public partial class ConditionalConfigSync
 
     private static void RefreshPolicyStatesForAll(string source, bool broadcast)
     {
-        foreach (ConditionalConfigSync configSync in configSyncs)
+        foreach (ConditionalConfigSync configSync in configSyncs.ToArray())
         {
             configSync.RefreshPolicyStates(source, broadcast);
         }
@@ -433,7 +477,7 @@ public partial class ConditionalConfigSync
         {
             StartBroadcastPackage(
                 GameReflection.Everybody,
-                ConfigsToPackage(changed.Select(c => c.BaseConfig), includeConfigValues: true, includeAllProvidedConfigStates: true));
+                () => ConfigsToPackage(changed.Select(c => c.BaseConfig), includeConfigValues: true, includeAllProvidedConfigStates: true));
         }
     }
 
