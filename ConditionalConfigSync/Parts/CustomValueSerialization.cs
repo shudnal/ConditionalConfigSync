@@ -51,6 +51,18 @@ public partial class ConditionalConfigSync
 
         if (effectiveType != typeof(List<string>))
         {
+            Type? collectionType = GetGenericCollectionType(effectiveType);
+            if (!effectiveType.IsArray && collectionType != null)
+            {
+                // Validate the declared type, not just the runtime collection. The matching reader
+                // must be able to create an assignable instance without changing the wire layout.
+                GetCollectionImplementationType(effectiveType, collectionType);
+            }
+            else if (effectiveType.IsInterface && value is ICollection)
+            {
+                throw new NotSupportedException($"Collection interface '{effectiveType.FullName}' has no supported materialization. Declare an ICollection<T>-based type or implement ISerializableParameter.");
+            }
+
             if (value is ICollection collection)
             {
                 GameReflection.PackageWrite(package, collection.Count);
@@ -58,7 +70,7 @@ public partial class ConditionalConfigSync
                 return;
             }
 
-            if (GetGenericCollectionType(effectiveType) is { } collectionType)
+            if (collectionType != null)
             {
                 int count = (int)collectionType.GetProperty("Count")!.GetValue(value)!;
                 GameReflection.PackageWrite(package, count);
@@ -111,6 +123,42 @@ public partial class ConditionalConfigSync
         }
         return type.GetInterfaces().Concat(new[] { type })
             .FirstOrDefault(candidate => candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(ICollection<>));
+    }
+
+    private static Type GetCollectionImplementationType(Type declaredType, Type collectionType)
+    {
+        if (!declaredType.IsInterface)
+        {
+            if (declaredType.IsAbstract || declaredType.GetConstructor(Type.EmptyTypes) == null)
+            {
+                throw new NotSupportedException($"Collection type '{declaredType.FullName}' requires a concrete type with a public parameterless constructor or ISerializableParameter.");
+            }
+            return declaredType;
+        }
+
+        Type elementType = collectionType.GenericTypeArguments[0];
+        Type listType = typeof(List<>).MakeGenericType(elementType);
+        if (declaredType.IsAssignableFrom(listType))
+        {
+            return listType;
+        }
+
+        Type setType = typeof(HashSet<>).MakeGenericType(elementType);
+        if (declaredType.IsAssignableFrom(setType))
+        {
+            return setType;
+        }
+
+        if (elementType.IsGenericType && elementType.GetGenericTypeDefinition() == typeof(KeyValuePair<,>))
+        {
+            Type dictionaryType = typeof(Dictionary<,>).MakeGenericType(elementType.GenericTypeArguments);
+            if (declaredType.IsAssignableFrom(dictionaryType))
+            {
+                return dictionaryType;
+            }
+        }
+
+        throw new NotSupportedException($"Collection interface '{declaredType.FullName}' has no compatible built-in implementation. Declare a constructible concrete type or implement ISerializableParameter.");
     }
 
     private static void RequireVectorArray(Type type)
@@ -226,8 +274,9 @@ public partial class ConditionalConfigSync
 
         if (effectiveType != typeof(List<string>) && GetGenericCollectionType(effectiveType) is { } collectionType)
         {
+            Type implementationType = GetCollectionImplementationType(effectiveType, collectionType);
             int entriesCount = GameReflection.PackageReadInt(package);
-            object collection = Activator.CreateInstance(effectiveType)!;
+            object collection = Activator.CreateInstance(implementationType)!;
             Type elementType = collectionType.GenericTypeArguments[0];
             MethodInfo adder = collectionType.GetMethod("Add")!;
             for (int i = 0; i < entriesCount; ++i)
