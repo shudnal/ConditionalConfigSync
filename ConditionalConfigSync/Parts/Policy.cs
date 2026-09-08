@@ -296,8 +296,9 @@ public partial class ConditionalConfigSync
     {
         lock (policyLock)
         {
-            // Ignore both old-session work and snapshots superseded while waiting for the main thread.
-            if (generation < policyAppliedGeneration || generation != Interlocked.Read(ref policyReadGeneration))
+            // Ignore old-session work and snapshots older than the state already applied. A mere
+            // watcher notification must not cancel a synchronous UI/console reload of its own write.
+            if (generation < policyAppliedGeneration)
             {
                 return;
             }
@@ -325,7 +326,7 @@ public partial class ConditionalConfigSync
         {
             File.WriteAllText(SyncPolicyPath,
                 "# ConditionalConfigSync sync policy. Server-side only.\n" +
-                "# Exact setting: + ModGuid.Section.Key or - ModGuid.Section\n".Replace("- ModGuid.Section\n", "- ModGuid.Section.Key\n") +
+                "# Exact setting: + ModGuid.Section.Key or - ModGuid.Section.Key\n" +
                 "# Whole section: + ModGuid.Section or - ModGuid.Section\n" +
                 "# + forces server-controlled; - forces client-controlled.\n" +
                 "# Exact-setting rules take precedence over section rules.\n" +
