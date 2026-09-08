@@ -14,12 +14,15 @@ namespace ConditionalConfigSync;
 [Description("Base class for runtime values synchronized independently from BepInEx config files.")]
 public abstract class CustomSyncedValueBase
 {
+    private readonly ConditionalConfigSync owner;
+
     /// <summary>
     /// Raised after the active value is applied or explicitly re-notified.
     /// </summary>
     /// <remarks>
     /// ConditionalConfigSync also listens to this event to publish changes. Avoid assigning the same value recursively
     /// from the handler. Use <see cref="NotifyChanged"/> after mutating a reference-type value in place.
+    /// Subscriber exceptions are logged individually and do not prevent later subscribers from running.
     /// </remarks>
     [Description("Raised when the active value is applied or explicitly re-notified.")]
     public event Action? ValueChanged;
@@ -28,7 +31,7 @@ public abstract class CustomSyncedValueBase
     /// Compatibility alias for <see cref="NotifyChanged"/>. Re-publishes and re-processes the current active value.
     /// </summary>
     [Description("Compatibility alias for NotifyChanged. Re-processes and republishes the current value.")]
-    public void Update() => ValueChanged?.Invoke();
+    public void Update() => NotifyChanged();
 
     /// <summary>
     /// Explicitly notifies subscribers that the current value must be processed again.
@@ -44,7 +47,28 @@ public abstract class CustomSyncedValueBase
     /// </example>
     /// </remarks>
     [Description("Forces subscribers and synchronization to process the current value again.")]
-    public void NotifyChanged() => ValueChanged?.Invoke();
+    public void NotifyChanged() => RaiseValueChanged();
+
+    private void RaiseValueChanged()
+    {
+        Action? handlers = ValueChanged;
+        if (handlers == null)
+        {
+            return;
+        }
+
+        foreach (Action handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                handler();
+            }
+            catch (Exception e)
+            {
+                owner.ReportCustomValueSubscriberFailure(Identifier, e);
+            }
+        }
+    }
 
     /// <summary>
     /// The local fallback retained by a client while a server value is active.
@@ -103,7 +127,7 @@ public abstract class CustomSyncedValueBase
 
         boxedValue = value;
         hasBoxedValue = true;
-        ValueChanged?.Invoke();
+        RaiseValueChanged();
         return true;
     }
 
@@ -111,6 +135,8 @@ public abstract class CustomSyncedValueBase
     /// True when the local side currently owns and may publish this value.
     /// </summary>
     protected bool localIsOwner;
+
+    internal void SetLocalOwnership(bool isOwner) => localIsOwner = isOwner;
 
     /// <summary>
     /// Ordering priority used when several custom values are batched or flushed together. Higher values come first.
@@ -135,13 +161,13 @@ public abstract class CustomSyncedValueBase
     /// <param name="priority">Batch ordering priority. Higher values come first.</param>
     protected CustomSyncedValueBase(ConditionalConfigSync configSync, string identifier, Type type, int priority)
     {
+        owner = configSync ?? throw new ArgumentNullException(nameof(configSync));
         Priority = priority;
         Identifier = identifier;
         Type = type;
         RegistrationIndex = ++nextRegistrationIndex;
-        configSync.AddCustomValue(this);
         localIsOwner = configSync.IsSourceOfTruth;
-        configSync.SourceOfTruthChanged += truth => localIsOwner = truth;
+        configSync.AddCustomValue(this);
     }
 
     internal void StoreLocalBaseValue(object? value)
@@ -222,7 +248,7 @@ public class CustomSyncedValue<T> : CustomSyncedValueBase
     /// <param name="configSync">The synchronization instance that owns this value.</param>
     /// <param name="identifier">A unique stable name within <paramref name="configSync"/>.</param>
     /// <param name="value">Initial local value.</param>
-    /// <param name="priority">Batch ordering priority. Higher values are processed before lower values.</param>
+    /// <param name="priority">Batch ordering priority. Higher values come first.</param>
     /// <param name="valueComparer">
     /// Optional equality comparer. It controls duplicate suppression for local assignments and received values. Supply a
     /// content comparer for arrays, lists, dictionaries, or domain objects when reference equality is not sufficient.
@@ -357,7 +383,7 @@ public sealed class SequencedCustomSyncedValue<T> : CustomSyncedValue<T>
     /// <param name="configSync">The synchronization instance that owns this value.</param>
     /// <param name="identifier">A unique stable name within <paramref name="configSync"/>.</param>
     /// <param name="value">Initial local payload value.</param>
-    /// <param name="priority">Batch ordering priority. Higher values are processed before lower values.</param>
+    /// <param name="priority">Batch ordering priority. Higher values come first.</param>
     /// <param name="valueComparer">
     /// Optional comparer used only by explicit change-checking operations such as
     /// <see cref="CustomSyncedValue{T}.AssignLocalValueIfChanged(T)"/>. Normal sequenced assignment does not suppress equality.
