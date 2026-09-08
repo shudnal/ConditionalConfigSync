@@ -103,6 +103,12 @@ public partial class ConditionalConfigSync
 
     private static Type? GetGenericCollectionType(Type type)
     {
+        // Structs implementing only ICollection<T> already use the reflected-field layout.
+        // Keep that successful encoding instead of changing them to a count/element format.
+        if (type.IsValueType)
+        {
+            return null;
+        }
         return type.GetInterfaces().Concat(new[] { type })
             .FirstOrDefault(candidate => candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(ICollection<>));
     }
