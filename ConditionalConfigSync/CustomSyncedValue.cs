@@ -17,12 +17,12 @@ public abstract class CustomSyncedValueBase
     private sealed class PendingPublication
     {
         internal readonly CustomSyncedValueBase Value;
-        internal readonly Action Publisher;
+        internal readonly object? SequencedValueSnapshot;
 
-        internal PendingPublication(CustomSyncedValueBase value, Action publisher)
+        internal PendingPublication(CustomSyncedValueBase value, object? sequencedValueSnapshot)
         {
             Value = value;
-            Publisher = publisher;
+            SequencedValueSnapshot = sequencedValueSnapshot;
         }
     }
 
@@ -31,6 +31,9 @@ public abstract class CustomSyncedValueBase
 
     [ThreadStatic]
     private static List<PendingPublication>? pendingPublications;
+
+    [ThreadStatic]
+    private static HashSet<CustomSyncedValueBase>? pendingStatePublications;
 
     private readonly ConditionalConfigSync owner;
 
@@ -69,35 +72,41 @@ public abstract class CustomSyncedValueBase
 
     private void RaiseValueChanged()
     {
+        if (!hasBoxedValue)
+        {
+            return;
+        }
+
+        List<PendingPublication> publications = pendingPublications ??= new List<PendingPublication>();
+        if (PreserveUpdateSequence)
+        {
+            // A sequenced value represents events, so every notification owns the payload that existed
+            // when that notification started, even if a handler immediately assigns a follow-up event.
+            publications.Add(new PendingPublication(this, boxedValue));
+        }
+        else if ((pendingStatePublications ??= new HashSet<CustomSyncedValueBase>()).Add(this))
+        {
+            // A state value keeps the ordering position of its first notification in this cascade but
+            // publishes the settled active value after all synchronous normalization callbacks finish.
+            publications.Add(new PendingPublication(this, null));
+        }
+
         Action? handlers = ValueChanged;
-        if (!hasBoxedValue || handlers == null)
-        {
-            return;
-        }
-
-        Delegate[] invocationList = handlers.GetInvocationList();
-        if (invocationList.Length == 0)
-        {
-            return;
-        }
-
-        // AddCustomValue installs the CCS publisher before a derived constructor can attach consumer handlers.
-        // Keep that internal callback out of the consumer phase so normalization/reentrant callbacks can settle
-        // the active value first. Publication is flushed after the outermost nested notification returns.
-        Action publisher = (Action)invocationList[0];
-        (pendingPublications ??= new List<PendingPublication>()).Add(new PendingPublication(this, publisher));
         ++notificationDepth;
         try
         {
-            for (int index = 1; index < invocationList.Length; ++index)
+            if (handlers != null)
             {
-                try
+                foreach (Action handler in handlers.GetInvocationList())
                 {
-                    ((Action)invocationList[index])();
-                }
-                catch (Exception e)
-                {
-                    owner.ReportCustomValueSubscriberFailure(Identifier, e);
+                    try
+                    {
+                        handler();
+                    }
+                    catch (Exception e)
+                    {
+                        owner.ReportCustomValueSubscriberFailure(Identifier, e);
+                    }
                 }
             }
         }
@@ -115,38 +124,24 @@ public abstract class CustomSyncedValueBase
     {
         List<PendingPublication>? publications = pendingPublications;
         pendingPublications = null;
+        pendingStatePublications = null;
         if (publications == null || publications.Count == 0)
         {
             return;
         }
 
-        // Latest-state values publish at their last occurrence in the notification cascade. Sequenced
-        // values retain every notification in invocation order. Publishers read the now-canonical active
-        // value, so normalization callbacks cannot expose a pre-normalized intermediate payload.
-        Dictionary<CustomSyncedValueBase, int> lastStatePublication = new();
-        for (int index = 0; index < publications.Count; ++index)
+        foreach (PendingPublication publication in publications)
         {
-            if (!publications[index].Value.PreserveUpdateSequence)
-            {
-                lastStatePublication[publications[index].Value] = index;
-            }
-        }
-
-        for (int index = 0; index < publications.Count; ++index)
-        {
-            PendingPublication publication = publications[index];
-            if (!publication.Value.PreserveUpdateSequence && lastStatePublication[publication.Value] != index)
-            {
-                continue;
-            }
-
+            object? publicationValue = publication.Value.PreserveUpdateSequence
+                ? publication.SequencedValueSnapshot
+                : publication.Value.BoxedValue;
             try
             {
-                publication.Publisher();
+                publication.Value.owner.PublishCustomValueChange(publication.Value, publicationValue);
             }
             catch (Exception e)
             {
-                publication.Value.owner.ReportCustomValueSubscriberFailure(publication.Value.Identifier, e);
+                publication.Value.owner.ReportCustomValuePublicationFailure(publication.Value.Identifier, e);
             }
         }
     }

@@ -539,7 +539,6 @@ public partial class ConditionalConfigSync
         allCustomValues.Add(customValue);
         allCustomValues = new HashSet<CustomSyncedValueBase>(allCustomValues.OrderByDescending(v => v.Priority).ThenBy(v => v.RegistrationIndex));
         InvalidateFullSyncSnapshot($"registered custom value: {customValue.Identifier}");
-        customValue.ValueChanged += () => OnCustomValueChanged(customValue);
         DebugLog(ConditionalConfigSyncDebugLevel.Trace, "Register", $"Added custom value {customValue.Identifier}, type={customValue.Type.Name}, priority={customValue.Priority}, sequenced={customValue.PreserveUpdateSequence}");
         ScheduleLateRegistrationSync(customValue: customValue);
     }
@@ -547,5 +546,10 @@ public partial class ConditionalConfigSync
     internal void ReportCustomValueSubscriberFailure(string identifier, Exception exception)
     {
         DebugWarning("CustomValue", $"ValueChanged subscriber for '{identifier}' failed; continuing with the remaining subscribers. Error: {exception}");
+    }
+
+    internal void ReportCustomValuePublicationFailure(string identifier, Exception exception)
+    {
+        DebugWarning("CustomValue", $"Failed to publish custom value '{identifier}' after its notification callbacks completed. Error: {exception}");
     }
 }

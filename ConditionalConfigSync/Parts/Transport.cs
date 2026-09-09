@@ -114,7 +114,7 @@ public partial class ConditionalConfigSync
             () => ConfigsToPackage(configs: new[] { configEntry }, includeConfigStates: isServer));
     }
 
-    private void OnCustomValueChanged(CustomSyncedValueBase customValue)
+    internal void PublishCustomValueChange(CustomSyncedValueBase customValue, object? publicationValue)
     {
         if (customValuesBeingApplied.Contains(customValue))
         {
@@ -123,7 +123,7 @@ public partial class ConditionalConfigSync
 
         if (IsSourceOfTruth)
         {
-            customValue.StoreLastAcceptedValue(customValue.BoxedValue);
+            customValue.StoreLastAcceptedValue(publicationValue);
             if (isServer)
             {
                 InvalidateFullSyncSnapshot($"custom value changed: {customValue.Identifier}");
@@ -154,14 +154,16 @@ public partial class ConditionalConfigSync
 
         if (!IsSourceOfTruth)
         {
-            customValue.StoreLastAcceptedValue(customValue.BoxedValue);
+            customValue.StoreLastAcceptedValue(publicationValue);
         }
 
         if (ShouldDeferOutgoingBroadcasts)
         {
             if (customValue.PreserveUpdateSequence)
             {
-                if (TryEnqueueSequencedPackage(() => ConfigsToPackage(customValues: new[] { customValue }), customValue.Identifier))
+                if (TryEnqueueSequencedPackage(
+                    () => ConfigsToPackage(packageEntries: new[] { PackageEntry.CustomValue(customValue, publicationValue) }),
+                    customValue.Identifier))
                 {
                     DebugLog(ConditionalConfigSyncDebugLevel.Verbose, "CustomValue", $"Queued sequenced {customValue.Identifier}, priority={customValue.Priority}");
                 }
@@ -176,7 +178,10 @@ public partial class ConditionalConfigSync
         }
 
         DebugLog(ConditionalConfigSyncDebugLevel.Verbose, "CustomValue", $"Broadcast {customValue.Identifier}, priority={customValue.Priority}");
-        StartBroadcastPackage(GameReflection.Everybody, () => ConfigsToPackage(customValues: new[] { customValue }), customValue.PreserveUpdateSequence);
+        StartBroadcastPackage(
+            GameReflection.Everybody,
+            () => ConfigsToPackage(packageEntries: new[] { PackageEntry.CustomValue(customValue, publicationValue) }),
+            customValue.PreserveUpdateSequence);
     }
 
     internal static class ZNetUpdatePatch
@@ -1464,10 +1469,45 @@ public partial class ConditionalConfigSync
         => StartBroadcastPackage(peers, () => package);
 
     private bool StartBroadcastPackage(long target, Func<ZPackage> createPackage, bool sequenced = false, SendSlot? reservation = null)
-        => StartBroadcastPackageCore(createPackage, (package, slot) => SendZPackage(target, package, sequenced, slot), sequenced, reservation);
+    {
+        List<ZNetPeer> peers = GameReflection.GetRoutedPeers();
+        if (target != GameReflection.Everybody)
+        {
+            peers = peers.Where(peer => GameReflection.GetPeerUid(peer) == target).ToList();
+        }
+        if (peers.Count == 0)
+        {
+            if (reservation != null)
+            {
+                ReleaseSendSlot(reservation);
+            }
+            return true;
+        }
 
-    private bool StartBroadcastPackage(List<ZNetPeer> peers, Func<ZPackage> createPackage)
-        => StartBroadcastPackageCore(createPackage, (package, slot) => SendZPackage(peers, package, reservation: slot));
+        return StartBroadcastPackageCore(
+            createPackage,
+            (package, slot) => SendZPackage(target, package, sequenced, slot),
+            sequenced,
+            reservation);
+    }
+
+    private bool StartBroadcastPackage(List<ZNetPeer> peers, Func<ZPackage> createPackage, bool sequenced = false, SendSlot? reservation = null)
+    {
+        if (peers.Count == 0)
+        {
+            if (reservation != null)
+            {
+                ReleaseSendSlot(reservation);
+            }
+            return true;
+        }
+
+        return StartBroadcastPackageCore(
+            createPackage,
+            (package, slot) => SendZPackage(peers, package, sequenced: sequenced, reservation: slot),
+            sequenced,
+            reservation);
+    }
 
     private bool StartBroadcastPackageCore(Func<ZPackage> createPackage, Func<ZPackage, SendSlot, IEnumerator> createSender,
         bool sequenced = false, SendSlot? reservation = null)
@@ -1500,9 +1540,48 @@ public partial class ConditionalConfigSync
                 return false;
             }
 
-            scheduled = GameReflection.StartCoroutine(createSender(package, slot), slot.Session) != null;
+            IEnumerator sender = createSender(package, slot);
+            bool hasPendingWork;
+            try
+            {
+                hasPendingWork = sender.MoveNext();
+            }
+            catch
+            {
+                (sender as IDisposable)?.Dispose();
+                throw;
+            }
+
+            if (!hasPendingWork)
+            {
+                // Unity may return null when an iterator finishes before its first yield. That is a
+                // successful synchronous/no-recipient completion, not a failed sender startup.
+                (sender as IDisposable)?.Dispose();
+                scheduled = true;
+                return true;
+            }
+
+            object? firstYield = sender.Current;
+            IEnumerator ContinueSender(IEnumerator activeSender, object? initialYield)
+            {
+                try
+                {
+                    yield return initialYield;
+                    while (activeSender.MoveNext())
+                    {
+                        yield return activeSender.Current;
+                    }
+                }
+                finally
+                {
+                    (activeSender as IDisposable)?.Dispose();
+                }
+            }
+
+            scheduled = GameReflection.StartCoroutine(ContinueSender(sender, firstYield), slot.Session) != null;
             if (!scheduled)
             {
+                (sender as IDisposable)?.Dispose();
                 RejectSync("Could not start the synchronization sender for the active session.", null, incoming: false);
             }
             return scheduled;

@@ -202,7 +202,9 @@ public partial class ConditionalConfigSync
             }
         }
 
-        foreach (KeyValuePair<CustomSyncedValueBase, object?> configKv in configs.customValues)
+        foreach (KeyValuePair<CustomSyncedValueBase, object?> configKv in configs.customValues
+                     .OrderByDescending(entry => entry.Key.Priority)
+                     .ThenBy(entry => entry.Key.RegistrationIndex))
         {
             if (!IsCurrentApplication())
             {
@@ -609,6 +611,13 @@ public partial class ConditionalConfigSync
         public static PackageEntry ServerVersion(string version) => new() { kind = PackageEntryKind.ServerVersion, value = version };
         public static PackageEntry LockExempt(bool value, int? capabilities = null) => new() { kind = PackageEntryKind.LockExempt, value = value, capabilities = capabilities };
         public static PackageEntry ConfigState(ConfigEntryBase config, bool serverControlled, bool hidden) => new() { kind = PackageEntryKind.ConfigState, section = config.Definition.Section, key = config.Definition.Key, serverControlled = serverControlled, hidden = hidden };
+        public static PackageEntry CustomValue(CustomSyncedValueBase customValue, object? value) => new()
+        {
+            kind = PackageEntryKind.CustomValue,
+            key = customValue.Identifier,
+            type = customValue.Type,
+            value = value,
+        };
     }
 
     private ZPackage ConfigsToPackage(

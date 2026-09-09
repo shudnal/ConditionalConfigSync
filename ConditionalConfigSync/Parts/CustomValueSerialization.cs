@@ -64,9 +64,11 @@ public partial class ConditionalConfigSync
                 // must be able to create an assignable instance without changing the wire layout.
                 GetCollectionImplementationType(effectiveType, collectionType);
             }
-            else if (effectiveType.IsInterface && value is ICollection)
+            else if (!effectiveType.IsArray && value is ICollection)
             {
-                throw new NotSupportedException($"Collection interface '{effectiveType.FullName}' has no supported materialization. Declare an ICollection<T>-based type or implement ISerializableParameter.");
+                throw new NotSupportedException(
+                    $"Collection type '{effectiveType.FullName}' has no symmetric count/element reader in the current protocol. " +
+                    "Declare an ICollection<T>-based type or implement ISerializableParameter.");
             }
 
             if (value is ICollection collection)
