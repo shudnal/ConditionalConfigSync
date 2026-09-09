@@ -30,7 +30,7 @@ public partial class ConditionalConfigSync
     {
         DebugLog(ConditionalConfigSyncDebugLevel.Verbose, "Apply", $"Applying configs={configs.configValues.Count}, custom={configs.customValues.Count}, states={configs.configStates.Count}");
         Dictionary<ConfigFile, bool> saveOnConfigSet = new();
-        List<PolicyStateChangedEventArgs> policyTransitions = new();
+        List<PolicyStateChangedEventArgs> policyTransitions = configs.policyTransitions;
         long generation = transportGeneration;
         bool IsCurrentApplication() => sessionActive && generation == transportGeneration;
 
@@ -236,22 +236,33 @@ public partial class ConditionalConfigSync
         {
             return;
         }
-        if (receivedFromServer)
+        if (receivedFromServer && configs.capabilities.HasValue)
         {
-            if (configs.capabilities.HasValue)
-            {
-                remotePolicyChangeSupported = (configs.capabilities.Value & PolicyChangeCapability) != 0;
-            }
+            remotePolicyChangeSupported = (configs.capabilities.Value & PolicyChangeCapability) != 0;
+        }
 
-            // lockExempt is process-wide. Update Configuration Manager metadata and LockStateChanged
-            // for every registered synchronization instance before policy subscribers are invoked.
-            foreach (ConditionalConfigSync configSync in configSyncs.ToArray())
+        // Omission cleanup and replacement application share this completion point. Refresh every
+        // affected instance before notifying any lock subscriber: lockExempt is process-wide.
+        ConditionalConfigSync[] notificationOwners = receivedFromServer ? configSyncs.ToArray() : new[] { this };
+        foreach (ConditionalConfigSync configSync in notificationOwners)
+        {
+            if (!IsCurrentApplication())
             {
-                if (!IsCurrentApplication())
-                {
-                    return;
-                }
-                configSync.ServerLockedSettingChanged();
+                return;
+            }
+            configSync.UpdateConfigMetadata();
+        }
+        foreach (ConditionalConfigSync configSync in notificationOwners)
+        {
+            if (!IsCurrentApplication())
+            {
+                return;
+            }
+            // This application is complete even though its RPC processing scope is still active.
+            // A different instance inside a reentrant application must publish at its own completion.
+            if (ReferenceEquals(configSync, this) || configSync.CanPublishConfigStateNotifications)
+            {
+                configSync.RaiseLockStateChangedIfNeeded();
             }
         }
 
@@ -272,6 +283,7 @@ public partial class ConditionalConfigSync
         public readonly Dictionary<CustomSyncedValueBase, object?> customValues = new();
         public readonly Dictionary<OwnConfigEntryBase, ReceivedConfigState> configStates = new();
         public readonly Dictionary<OwnConfigEntryBase, ReceivedConfigState> clientConfigStateClaims = new();
+        public readonly List<PolicyStateChangedEventArgs> policyTransitions = new();
         public int? capabilities;
         public string? rejectionReason;
         public int entryCount;

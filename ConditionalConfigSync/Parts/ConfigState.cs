@@ -80,7 +80,21 @@ public partial class ConditionalConfigSync
         return "the local side is not authorized to change this server-controlled config";
     }
 
+    private bool CanPublishConfigStateNotifications => !IsProcessing
+        && configsBeingApplied.Count == 0 && customValuesBeingApplied.Count == 0;
+
     private void ServerLockedSettingChanged()
+    {
+        UpdateConfigMetadata();
+        // SettingChanged for the locking entry also reaches this method during package application
+        // and fallback restoration. Final application/reset publishes the resulting lock state.
+        if (CanPublishConfigStateNotifications)
+        {
+            RaiseLockStateChangedIfNeeded();
+        }
+    }
+
+    private void UpdateConfigMetadata()
     {
         DebugLog(
             ConditionalConfigSyncDebugLevel.Verbose,
@@ -93,10 +107,6 @@ public partial class ConditionalConfigSync
             attributes.ReadOnly = !IsWritableConfig(configEntryBase);
             attributes.Browsable = !configEntryBase.IsHidden;
         }
-
-        // A lock subscriber may inspect the configuration manager or register another setting.
-        // Publish the event only after every existing entry has its final metadata.
-        RaiseLockStateChangedIfNeeded();
     }
 
     private void RestoreRejectedConfigChange(ConfigEntryBase configEntry, OwnConfigEntryBase syncedEntry, string reason)
@@ -271,6 +281,14 @@ public partial class ConditionalConfigSync
             {
                 customValuesBeingApplied.Remove(config);
             }
+        }
+
+        if (retainedSnapshot != null)
+        {
+            // Omission cleanup is only the first half of replacing a full snapshot. Keep its policy
+            // events with that application instead of exposing restored values alongside stale retained values.
+            retainedSnapshot.policyTransitions.AddRange(policyTransitions);
+            return;
         }
 
         ServerLockedSettingChanged();
