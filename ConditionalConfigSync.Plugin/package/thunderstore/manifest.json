@@ -4,6 +4,6 @@
     "website_url":  "https://github.com/shudnal/ConditionalConfigSync",
     "description":  "Shared config synchronization and server policy library for Valheim mods. Installed as a dependency and compatible with Jotunn and ServerSync.",
     "dependencies":  [
-                         "denikson-BepInExPack_Valheim-5.4.2333"
+                         "denikson-BepInExPack_Valheim-5.4.2350"
                      ]
 }
