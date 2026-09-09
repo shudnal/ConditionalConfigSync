@@ -381,13 +381,56 @@ internal static class GameReflection
         }
 
         Delegate action = Delegate.CreateDelegate(TerminalConsoleEventFailableType, handler);
-        ConstructorInfo constructor = TerminalConsoleCommandType.GetConstructors(Any)
-            .First(c => c.GetParameters().Length == 12 && c.GetParameters()[2].ParameterType == TerminalConsoleEventFailableType);
-        constructor.Invoke(new object?[]
+        ConstructorInfo? constructor = TerminalConsoleCommandType.GetConstructors(Any)
+            .FirstOrDefault(candidate =>
+            {
+                ParameterInfo[] parameters = candidate.GetParameters();
+                return parameters.Length >= 3
+                       && parameters[0].ParameterType == typeof(string)
+                       && parameters[1].ParameterType == typeof(string)
+                       && parameters[2].ParameterType == TerminalConsoleEventFailableType
+                       && parameters.Skip(3).All(parameter => parameter.HasDefaultValue);
+            });
+        if (constructor == null)
         {
-            command, description, action, isCheat, isNetwork, onlyServer, isSecret,
-            allowInDevBuild, null, false, remoteCommand, onlyAdmin,
-        });
+            throw new MissingMethodException(TerminalConsoleCommandType.FullName, ".ctor(string, string, ConsoleEventFailable, ...)");
+        }
+
+        ParameterInfo[] constructorParameters = constructor.GetParameters();
+        object?[] arguments = constructorParameters
+            .Select(parameter => parameter.HasDefaultValue ? parameter.DefaultValue : null)
+            .ToArray();
+        arguments[0] = command;
+        arguments[1] = description;
+        arguments[2] = action;
+
+        Dictionary<string, object?> overrides = new(StringComparer.Ordinal)
+        {
+            ["isCheat"] = isCheat,
+            ["isNetwork"] = isNetwork,
+            ["onlyServer"] = onlyServer,
+            ["isSecret"] = isSecret,
+            ["allowInDevBuild"] = allowInDevBuild,
+            ["remoteCommand"] = remoteCommand,
+            ["onlyAdmin"] = onlyAdmin,
+        };
+        HashSet<string> appliedOverrides = new(StringComparer.Ordinal);
+        for (int index = 3; index < constructorParameters.Length; ++index)
+        {
+            string? parameterName = constructorParameters[index].Name;
+            if (parameterName != null && overrides.TryGetValue(parameterName, out object? value))
+            {
+                arguments[index] = value;
+                appliedOverrides.Add(parameterName);
+            }
+        }
+        if (appliedOverrides.Count != overrides.Count)
+        {
+            string missing = string.Join(", ", overrides.Keys.Where(name => !appliedOverrides.Contains(name)));
+            throw new MissingMemberException($"Terminal.ConsoleCommand constructor is missing expected parameter(s): {missing}.");
+        }
+
+        constructor.Invoke(arguments);
     }
 
     internal static int ConsoleArgsLength(Terminal.ConsoleEventArgs args)

@@ -1247,12 +1247,13 @@ public partial class ConditionalConfigSync
                 }
             }
 
-            // The client registers PlayerList and AdminList handlers while processing PeerInfo,
-            // so these vanilla follow-up RPCs must not overtake the buffered PeerInfo package.
+            // These handlers are registered while the client processes PeerInfo. Buffer the immediate
+            // server follow-ups until PeerInfo has been delivered; pre-PeerInfo handshake RPCs remain unbuffered.
             private static bool ShouldBufferInitialPackage(int methodHash)
             {
                 return methodHash == GameReflection.StableHash("PeerInfo")
                        || methodHash == GameReflection.StableHash("PlayerList")
+                       || methodHash == GameReflection.StableHash("HistoricalPlayerList")
                        || methodHash == GameReflection.StableHash("AdminList")
                        || methodHash == GameReflection.StableHash("RoutedRPC")
                        || methodHash == GameReflection.StableHash("ZDOData");
