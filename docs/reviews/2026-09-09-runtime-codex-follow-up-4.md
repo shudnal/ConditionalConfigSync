@@ -2,7 +2,7 @@
 
 ## Scope
 
-This pass starts from `510cb1be3aa9184a53922280efcfd1768fd5e4ff` on `fix/full-repository-review-20260908`. It addresses the maintainer-observed local-world warning `Could not start the synchronization sender for the active session.` and the three findings from Codex's review of that head.
+This pass starts from `510cb1be3aa9184a53922280efcfd1768fd5e4ff` on `fix/full-repository-review-20260908`. The source corrections are committed in `cf81fa9ea0dbf32d16427536ec49abc60e5db67d`; subsequent commits only refine this review record. The pass addresses the maintainer-observed local-world warning `Could not start the synchronization sender for the active session.` and the three findings from Codex's review of `510cb1b`.
 
 Operating assumptions remain normal intended compatible clients. No attacker, modified/malformed-client, forged-RPC or speculative security-hardening analysis is included. Package version 1.0.5, protocol 1 and core AssemblyVersion 1.0.0.0 remain unchanged.
 
