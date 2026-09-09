@@ -52,7 +52,7 @@ public abstract class CustomSyncedValueBase
     private void RaiseValueChanged()
     {
         Action? handlers = ValueChanged;
-        if (handlers == null)
+        if (!hasBoxedValue || handlers == null)
         {
             return;
         }
@@ -96,7 +96,15 @@ public abstract class CustomSyncedValueBase
     private object? boxedValue;
     private bool hasBoxedValue;
 
-    internal void InitializeBoxedValue(object? value)
+    /// <summary>Initializes construction-time state without notifying subscribers or publishing it.</summary>
+    /// <param name="value">The initial local value.</param>
+    /// <remarks>
+    /// Use only from derived constructors, including constructors in consumer assemblies. This path also establishes
+    /// the initial local fallback on a replica. Use it for every construction-time assignment when initialization has
+    /// several steps; use <see cref="AssignBoxedValue"/> or the typed assignment methods for subsequent runtime changes.
+    /// Late registration still supplies the initial server publication or requests the authoritative client snapshot.
+    /// </remarks>
+    protected internal void InitializeBoxedValue(object? value)
     {
         // Registration is already scheduled by the base constructor. Initial local data is not a
         // publication, even for an administrator or a sequenced value registered during a session.
@@ -129,11 +137,20 @@ public abstract class CustomSyncedValueBase
     /// </summary>
     /// <param name="value">The candidate active value.</param>
     /// <param name="notifyIfEqual">When true, notify even if the configured comparer reports equality.</param>
-    /// <returns>True when the value was accepted and <see cref="ValueChanged"/> was raised.</returns>
-    /// <remarks>Intended for custom derived value types. Most mods should use the typed public assignment methods.</remarks>
+    /// <returns>True when the value was accepted and <see cref="ValueChanged"/> was raised; false for initialization.</returns>
+    /// <remarks>
+    /// Intended for custom derived value types. The first assignment initializes silently, so existing subclasses
+    /// that initialize through this method do not publish their constructor argument. For multi-step constructor
+    /// initialization, use <see cref="InitializeBoxedValue"/> for each step. Most mods should use typed public assignments.
+    /// </remarks>
     protected bool AssignBoxedValue(object? value, bool notifyIfEqual)
     {
-        if (hasBoxedValue && BoxedValuesEqual(boxedValue, value) && !notifyIfEqual)
+        if (!hasBoxedValue)
+        {
+            InitializeBoxedValue(value);
+            return false;
+        }
+        if (BoxedValuesEqual(boxedValue, value) && !notifyIfEqual)
         {
             return false;
         }
@@ -311,7 +328,7 @@ public class CustomSyncedValue<T> : CustomSyncedValueBase
     /// watchers, or repeated recalculation where only changed state should trigger handlers and network traffic.
     /// <example>
     /// <code>
-    /// settingsJson.AssignLocalValueIfChanged(File.ReadAllText(path));
+    /// settingsJson.AssignLocalValueIfChanged(ReadSettings());
     /// </code>
     /// </example>
     /// </remarks>
@@ -369,7 +386,7 @@ public class CustomSyncedValue<T> : CustomSyncedValueBase
 /// <remarks>
 /// A normal <see cref="CustomSyncedValue{T}"/> represents the latest state and may coalesce pending updates. A sequenced
 /// value snapshots every deferred assignment into its own package. Use it for commands, pulses, combat events, or any
-/// message where <c>A, A</c> means two events rather than one state. Do not use it merely to force initial processing;
+/// message where <c>A, A</c> means two events rather than one state. Do not use it merely to force initial state processing;
 /// use <see cref="CustomSyncedValue{T}.AssignLocalValueAndNotify(T)"/> for that.
 /// <example>
 /// <code>
