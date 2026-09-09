@@ -20,6 +20,7 @@ public partial class ConditionalConfigSync
         Type effectiveType = Nullable.GetUnderlyingType(type) ?? type;
         if (typeof(ISerializableParameter).IsAssignableFrom(effectiveType))
         {
+            RequireConstructibleSerializableParameter(effectiveType);
             GameReflection.SerializeParameter(value, ref package);
             return;
         }
@@ -66,7 +67,8 @@ public partial class ConditionalConfigSync
             if (value is ICollection collection)
             {
                 GameReflection.PackageWrite(package, collection.Count);
-                WriteCollectionElements(package, collection);
+                Type? elementType = effectiveType.IsArray ? effectiveType.GetElementType() : collectionType?.GenericTypeArguments[0];
+                WriteCollectionElements(package, collection, elementType);
                 return;
             }
 
@@ -74,7 +76,7 @@ public partial class ConditionalConfigSync
             {
                 int count = (int)collectionType.GetProperty("Count")!.GetValue(value)!;
                 GameReflection.PackageWrite(package, count);
-                WriteCollectionElements(package, (IEnumerable)value);
+                WriteCollectionElements(package, (IEnumerable)value, collectionType.GenericTypeArguments[0]);
                 return;
             }
         }
@@ -99,7 +101,7 @@ public partial class ConditionalConfigSync
         }
     }
 
-    private static void WriteCollectionElements(ZPackage package, IEnumerable collection)
+    private static void WriteCollectionElements(ZPackage package, IEnumerable collection, Type? declaredElementType)
     {
         foreach (object? item in collection)
         {
@@ -109,7 +111,30 @@ public partial class ConditionalConfigSync
                 // list/array encodings. Nullable root values and reflected fields remain supported.
                 throw new NotSupportedException("Null collection elements have no encoding in the current protocol. Use ISerializableParameter for a nullable collection format.");
             }
+            if (declaredElementType != null)
+            {
+                // The reader uses the declared element type, even though the legacy writer dispatches
+                // on the runtime object. Do not let a concrete item conceal an unconstructible interface.
+                RequireConstructibleSerializableParameter(declaredElementType);
+            }
             WriteValueWithTypeToZPackage(package, item.GetType(), item);
+        }
+    }
+
+    private static void RequireConstructibleSerializableParameter(Type type)
+    {
+        Type effectiveType = Nullable.GetUnderlyingType(type) ?? type;
+        if (!typeof(ISerializableParameter).IsAssignableFrom(effectiveType))
+        {
+            return;
+        }
+
+        // Mirror Activator.CreateInstance(Type) on the receiving side. Structs have a valid default
+        // construction path even when reflection does not report an explicit parameterless constructor.
+        if (effectiveType.IsInterface || effectiveType.IsAbstract || effectiveType.ContainsGenericParameters
+            || !effectiveType.IsValueType && effectiveType.GetConstructor(Type.EmptyTypes) == null)
+        {
+            throw new NotSupportedException($"ISerializableParameter type '{effectiveType.FullName}' cannot be constructed by the matching reader. Declare a closed concrete value type or a class with a public parameterless constructor.");
         }
     }
 
@@ -197,6 +222,7 @@ public partial class ConditionalConfigSync
         Type effectiveType = Nullable.GetUnderlyingType(type) ?? type;
         if (typeof(ISerializableParameter).IsAssignableFrom(effectiveType))
         {
+            RequireConstructibleSerializableParameter(effectiveType);
             object value = Activator.CreateInstance(effectiveType) ?? throw new MissingMethodException($"Cannot create {effectiveType.FullName} for ISerializableParameter deserialization");
             GameReflection.DeserializeParameter(value, ref package);
             return value;
