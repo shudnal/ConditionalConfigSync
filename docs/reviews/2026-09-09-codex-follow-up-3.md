@@ -13,6 +13,7 @@ Codex finding: `CustomSyncedValue<List<object>>` could serialize a runtime `stri
 Correction: collection element serialization now uses the declared element encoding and rejects a non-null runtime element whose effective runtime type differs from the declared element type. Nullable value-type boxing is handled through the nullable underlying type. ISerializableParameter elements still require a receiver-constructible exact declared type. This is a validation correction only; no new marker or successful wire layout is introduced.
 
 The same exact-runtime-type rule is applied to root ISerializableParameter values because Valheim's writer dispatches on the runtime object while the reader constructs the declared type.
+The legacy ZRpc fallback for other reference types is checked the same way: a declared base/interface/object value cannot hide a different runtime encoding that the declared-type reader would not consume symmetrically.
 
 ## 2. Custom-value normalization before publication
 

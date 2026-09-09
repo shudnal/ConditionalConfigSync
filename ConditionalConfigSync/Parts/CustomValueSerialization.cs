@@ -98,6 +98,7 @@ public partial class ConditionalConfigSync
             return;
         }
 
+        RequireExactRuntimeType(effectiveType, value, "custom value");
         int startPosition = GameReflection.PackageGetPos(package);
         GameReflection.Serialize(new[] { value }, ref package);
         if (GameReflection.PackageGetPos(package) == startPosition)
