@@ -25,6 +25,6 @@ internal static class RuntimeGuard
         throw new InvalidOperationException(
             $"An embedded copy of ConditionalConfigSync was detected inside assembly '{assembly.GetName().Name}'. " +
             "Embedded copies are not supported. Remove the embedded library, reference ConditionalConfigSync.dll normally, " +
-            "and add the BepInEx hard dependency '{PluginInfo.PluginGuid}'.");
+            $"and add the BepInEx hard dependency '{PluginGuid}'.");
     }
 }

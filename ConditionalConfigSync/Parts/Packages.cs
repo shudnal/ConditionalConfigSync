@@ -1,15 +1,10 @@
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
-using System.Reflection;
-using System.Runtime.Serialization;
 using BepInEx.Configuration;
-using HarmonyLib;
 
 namespace ConditionalConfigSync;
 
@@ -35,7 +30,18 @@ public partial class ConditionalConfigSync
     {
         DebugLog(ConditionalConfigSyncDebugLevel.Verbose, "Apply", $"Applying configs={configs.configValues.Count}, custom={configs.customValues.Count}, states={configs.configStates.Count}");
         Dictionary<ConfigFile, bool> saveOnConfigSet = new();
-        List<PolicyStateChangedEventArgs> policyTransitions = new();
+        List<PolicyStateChangedEventArgs> policyTransitions = configs.policyTransitions;
+        long generation = transportGeneration;
+        bool IsCurrentApplication() => sessionActive && generation == transportGeneration;
+
+        if (receivedFromServer)
+        {
+            // Entries included in this package no longer need a late-registration request. Entries
+            // registered by deserializers or callbacks but absent from its lookup maps remain pending.
+            lateRegisteredConfigs.ExceptWith(configs.configValues.Keys);
+            lateRegisteredConfigs.ExceptWith(configs.configStates.Keys);
+            lateRegisteredCustomValues.ExceptWith(configs.customValues.Keys);
+        }
 
         void DisableSaveOnConfigSet(ConfigFile configFile)
         {
@@ -48,12 +54,20 @@ public partial class ConditionalConfigSync
 
         bool SetConfigValue(OwnConfigEntryBase config, object? value)
         {
+            if (!IsCurrentApplication())
+            {
+                return false;
+            }
             ConfigFile configFile = config.BaseConfig.ConfigFile;
             DisableSaveOnConfigSet(configFile);
             configsBeingApplied.Add(config.BaseConfig);
             try
             {
                 config.BaseConfig.BoxedValue = value;
+                if (!IsCurrentApplication())
+                {
+                    return false;
+                }
                 config.StoreLastAcceptedValue(config.BaseConfig.BoxedValue);
                 return true;
             }
@@ -122,6 +136,10 @@ public partial class ConditionalConfigSync
 
             foreach (KeyValuePair<OwnConfigEntryBase, object?> configKv in configs.configValues)
             {
+                if (!IsCurrentApplication())
+                {
+                    return;
+                }
                 if (receivedFromServer)
                 {
                     configKv.Key.StoreServerValue(configKv.Value);
@@ -144,6 +162,10 @@ public partial class ConditionalConfigSync
             {
                 foreach (KeyValuePair<OwnConfigEntryBase, ReceivedConfigState> stateKv in configs.configStates)
                 {
+                    if (!IsCurrentApplication())
+                    {
+                        return;
+                    }
                     if (configs.configValues.ContainsKey(stateKv.Key))
                     {
                         continue;
@@ -165,6 +187,10 @@ public partial class ConditionalConfigSync
             foreach (KeyValuePair<ConfigFile, bool> kv in saveOnConfigSet)
             {
                 kv.Key.SaveOnConfigSet = kv.Value;
+                if (!IsCurrentApplication())
+                {
+                    continue;
+                }
                 try
                 {
                     kv.Key.Save();
@@ -176,8 +202,14 @@ public partial class ConditionalConfigSync
             }
         }
 
-        foreach (KeyValuePair<CustomSyncedValueBase, object?> configKv in configs.customValues)
+        foreach (KeyValuePair<CustomSyncedValueBase, object?> configKv in configs.customValues
+                     .OrderByDescending(entry => entry.Key.Priority)
+                     .ThenBy(entry => entry.Key.RegistrationIndex))
         {
+            if (!IsCurrentApplication())
+            {
+                return;
+            }
             if (!isServer && !configKv.Key.HasLocalBaseValue)
             {
                 configKv.Key.StoreLocalBaseValue(configKv.Key.BoxedValue);
@@ -187,7 +219,10 @@ public partial class ConditionalConfigSync
             try
             {
                 configKv.Key.BoxedValue = configKv.Value;
-                configKv.Key.StoreLastAcceptedValue(configKv.Key.BoxedValue);
+                if (IsCurrentApplication())
+                {
+                    configKv.Key.StoreLastAcceptedValue(configKv.Key.BoxedValue);
+                }
             }
             catch (Exception e)
             {
@@ -199,24 +234,47 @@ public partial class ConditionalConfigSync
             }
         }
 
-        if (receivedFromServer)
+        if (!IsCurrentApplication())
         {
-            if (configs.capabilities.HasValue)
-            {
-                remotePolicyChangeSupported = (configs.capabilities.Value & PolicyChangeCapability) != 0;
-            }
+            return;
+        }
+        if (receivedFromServer && configs.capabilities.HasValue)
+        {
+            remotePolicyChangeSupported = (configs.capabilities.Value & PolicyChangeCapability) != 0;
+        }
 
-            // lockExempt is process-wide. Update Configuration Manager metadata and LockStateChanged
-            // for every registered synchronization instance before policy subscribers are invoked.
-            foreach (ConditionalConfigSync configSync in configSyncs)
+        // Omission cleanup and replacement application share this completion point. Refresh every
+        // affected instance before notifying any lock subscriber: lockExempt is process-wide.
+        ConditionalConfigSync[] notificationOwners = receivedFromServer ? configSyncs.ToArray() : new[] { this };
+        foreach (ConditionalConfigSync configSync in notificationOwners)
+        {
+            if (!IsCurrentApplication())
             {
-                configSync.ServerLockedSettingChanged();
+                return;
+            }
+            configSync.UpdateConfigMetadata();
+        }
+        foreach (ConditionalConfigSync configSync in notificationOwners)
+        {
+            if (!IsCurrentApplication())
+            {
+                return;
+            }
+            // This application is complete even though its RPC processing scope is still active.
+            // A different instance inside a reentrant application must publish at its own completion.
+            if (ReferenceEquals(configSync, this) || configSync.CanPublishConfigStateNotifications)
+            {
+                configSync.RaiseLockStateChangedIfNeeded();
             }
         }
 
         // Policy subscribers observe the final active values and effective read-only/visibility metadata.
         foreach (PolicyStateChangedEventArgs transition in policyTransitions)
         {
+            if (!IsCurrentApplication())
+            {
+                return;
+            }
             RaisePolicyStateEvents(transition);
         }
     }
@@ -227,6 +285,7 @@ public partial class ConditionalConfigSync
         public readonly Dictionary<CustomSyncedValueBase, object?> customValues = new();
         public readonly Dictionary<OwnConfigEntryBase, ReceivedConfigState> configStates = new();
         public readonly Dictionary<OwnConfigEntryBase, ReceivedConfigState> clientConfigStateClaims = new();
+        public readonly List<PolicyStateChangedEventArgs> policyTransitions = new();
         public int? capabilities;
         public string? rejectionReason;
         public int entryCount;
@@ -420,7 +479,7 @@ public partial class ConditionalConfigSync
                         }
 
                         string expectedType = GetZPackageTypeString(config.Type);
-                        if (typeName != expectedType)
+                        if (!IsCompatibleZPackageTypeString(typeName, config.Type))
                         {
                             if (strictClientUpdate)
                             {
@@ -552,6 +611,13 @@ public partial class ConditionalConfigSync
         public static PackageEntry ServerVersion(string version) => new() { kind = PackageEntryKind.ServerVersion, value = version };
         public static PackageEntry LockExempt(bool value, int? capabilities = null) => new() { kind = PackageEntryKind.LockExempt, value = value, capabilities = capabilities };
         public static PackageEntry ConfigState(ConfigEntryBase config, bool serverControlled, bool hidden) => new() { kind = PackageEntryKind.ConfigState, section = config.Definition.Section, key = config.Definition.Key, serverControlled = serverControlled, hidden = hidden };
+        public static PackageEntry CustomValue(CustomSyncedValueBase customValue, object? value) => new()
+        {
+            kind = PackageEntryKind.CustomValue,
+            key = customValue.Identifier,
+            type = customValue.Type,
+            value = value,
+        };
     }
 
     private ZPackage ConfigsToPackage(
@@ -731,120 +797,6 @@ public partial class ConditionalConfigSync
         }
 
         return ReadValueWithTypeFromZPackage(package, type);
-    }
-
-    // ConfigEntry values use TOML strings. Custom values stay free-form and may use Valheim's own serializer hook.
-    private static void WriteValueWithTypeToZPackage(ZPackage package, Type type, object value)
-    {
-        Type effectiveType = Nullable.GetUnderlyingType(type) ?? type;
-
-        if (typeof(ISerializableParameter).IsAssignableFrom(effectiveType))
-        {
-            GameReflection.SerializeParameter(value, ref package);
-            return;
-        }
-
-        if (effectiveType.IsEnum)
-        {
-            WriteValueWithTypeToZPackage(package, Enum.GetUnderlyingType(effectiveType), ((IConvertible)value).ToType(Enum.GetUnderlyingType(effectiveType), CultureInfo.InvariantCulture));
-            return;
-        }
-
-        if (value is ICollection collection && effectiveType != typeof(string) && effectiveType != typeof(List<string>))
-        {
-            GameReflection.PackageWrite(package, collection.Count);
-            foreach (object item in collection)
-            {
-                WriteValueWithTypeToZPackage(package, item.GetType(), item);
-            }
-            return;
-        }
-
-        if (effectiveType is { IsValueType: true, IsPrimitive: false })
-        {
-            FieldInfo[] fields = effectiveType.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            GameReflection.PackageWrite(package, fields.Length);
-            foreach (FieldInfo field in fields)
-            {
-                GameReflection.PackageWrite(package, GetZPackageTypeString(field.FieldType));
-                object? fieldValue = field.GetValue(value);
-                WriteCustomValueToPackage(package, field.FieldType, fieldValue);
-            }
-            return;
-        }
-
-        GameReflection.Serialize(new[] { value }, ref package);
-    }
-
-    private static object ReadValueWithTypeFromZPackage(ZPackage package, Type type)
-    {
-        Type effectiveType = Nullable.GetUnderlyingType(type) ?? type;
-
-        if (typeof(ISerializableParameter).IsAssignableFrom(effectiveType))
-        {
-            object value = Activator.CreateInstance(effectiveType) ?? throw new MissingMethodException($"Cannot create {effectiveType.FullName} for ISerializableParameter deserialization");
-            GameReflection.DeserializeParameter(value, ref package);
-            return value;
-        }
-
-        if (effectiveType.IsEnum)
-        {
-            object underlying = ReadValueWithTypeFromZPackage(package, Enum.GetUnderlyingType(effectiveType));
-            return Enum.ToObject(effectiveType, underlying);
-        }
-
-        if (effectiveType is { IsValueType: true, IsPrimitive: false })
-        {
-            FieldInfo[] fields = effectiveType.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            int fieldCount = GameReflection.PackageReadInt(package);
-            if (fieldCount != fields.Length)
-            {
-                throw new InvalidDeserializationTypeException { received = $"(field count: {fieldCount})", expected = $"(field count: {fields.Length})" };
-            }
-
-            object value = FormatterServices.GetUninitializedObject(effectiveType);
-            foreach (FieldInfo field in fields)
-            {
-                string typeName = GameReflection.PackageReadString(package);
-                if (typeName != GetZPackageTypeString(field.FieldType))
-                {
-                    throw new InvalidDeserializationTypeException { received = typeName, expected = GetZPackageTypeString(field.FieldType), field = field.Name };
-                }
-                field.SetValue(value, ReadCustomValueFromPackage(package, field.FieldType));
-            }
-            return value;
-        }
-        if (effectiveType.IsGenericType && effectiveType.GetGenericTypeDefinition() == typeof(Dictionary<,>))
-        {
-            int entriesCount = GameReflection.PackageReadInt(package);
-            IDictionary dict = (IDictionary)Activator.CreateInstance(effectiveType)!;
-            Type kvType = typeof(KeyValuePair<,>).MakeGenericType(effectiveType.GenericTypeArguments);
-            FieldInfo keyField = kvType.GetField("key", BindingFlags.NonPublic | BindingFlags.Instance)!;
-            FieldInfo valueField = kvType.GetField("value", BindingFlags.NonPublic | BindingFlags.Instance)!;
-            for (int i = 0; i < entriesCount; ++i)
-            {
-                object kv = ReadValueWithTypeFromZPackage(package, kvType);
-                dict.Add(keyField.GetValue(kv), valueField.GetValue(kv));
-            }
-            return dict;
-        }
-        if (effectiveType != typeof(List<string>) && effectiveType.IsGenericType && typeof(ICollection<>).MakeGenericType(effectiveType.GenericTypeArguments[0]) is { } collectionType && collectionType.IsAssignableFrom(effectiveType))
-        {
-            int entriesCount = GameReflection.PackageReadInt(package);
-            object list = Activator.CreateInstance(effectiveType)!;
-            MethodInfo adder = collectionType.GetMethod("Add")!;
-            for (int i = 0; i < entriesCount; ++i)
-            {
-                adder.Invoke(list, new[] { ReadValueWithTypeFromZPackage(package, effectiveType.GenericTypeArguments[0]) });
-            }
-            return list;
-        }
-
-        ParameterInfo param = (ParameterInfo)FormatterServices.GetUninitializedObject(typeof(ParameterInfo));
-        AccessTools.DeclaredField(typeof(ParameterInfo), "ClassImpl").SetValue(param, effectiveType);
-        List<object> data = new();
-        GameReflection.Deserialize(new[] { null, param }, package, ref data);
-        return data.First();
     }
 
     private static ArraySegment<byte> GetPackageArraySegment(ZPackage package)

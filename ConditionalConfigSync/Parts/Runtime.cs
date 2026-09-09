@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using BepInEx;
 using BepInEx.Configuration;
@@ -25,6 +26,8 @@ public partial class ConditionalConfigSync
     private static readonly object mainThreadQueueLock = new();
 
     private static readonly Queue<Action> mainThreadQueue = new();
+
+    private static long mainThreadQueueGeneration;
 
     private const string ConfigDirectoryName = "shudnal.ConditionalConfigSync";
 
@@ -80,12 +83,22 @@ public partial class ConditionalConfigSync
             mainThreadId = Thread.CurrentThread.ManagedThreadId;
         }
 
-        for (;;)
+        int pendingCount;
+        long generation;
+        lock (mainThreadQueueLock)
         {
-            Action? action;
+            pendingCount = mainThreadQueue.Count;
+            generation = mainThreadQueueGeneration;
+        }
+
+        // Actions scheduled by callbacks belong to the next update. In particular, a retry must not
+        // repeatedly requeue itself inside the same frame or consume work from a replacement session.
+        for (int index = 0; index < pendingCount; ++index)
+        {
+            Action action;
             lock (mainThreadQueueLock)
             {
-                if (mainThreadQueue.Count == 0)
+                if (generation != mainThreadQueueGeneration || mainThreadQueue.Count == 0)
                 {
                     return;
                 }
@@ -118,6 +131,9 @@ public partial class ConditionalConfigSync
             EnsureDebugSupportInitialized();
             try
             {
+                // GameReflection has beforefieldinit semantics. Calling an empty validation method
+                // alone does not require the runtime to initialize its cached reflection bindings.
+                RuntimeHelpers.RunClassConstructor(typeof(GameReflection).TypeHandle);
                 GameReflection.ValidateBindings();
             }
             catch (Exception e)
@@ -222,7 +238,7 @@ public partial class ConditionalConfigSync
         {
             throw new InvalidOperationException(
                 "ConditionalConfigSync runtime is not initialized. Install the standalone ConditionalConfigSync mod " +
-                "and add the BepInEx hard dependency '{PluginInfo.PluginGuid}'.");
+                $"and add the BepInEx hard dependency '{PluginInfoCCS.PluginGuid}'.");
         }
     }
 

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.ComponentModel;
 using BepInEx.Configuration;
 
@@ -137,7 +138,7 @@ public abstract class OwnConfigEntryBase
     /// This is a convenience projection of <see cref="SynchronizationPolicyControlState"/>. It returns
     /// <see langword="true"/> only when the state is <see cref="ConfigSyncPolicyControlState.Available"/>.
     /// </remarks>
-    [Description("Whether the current process may change this Conditional setting's server policy.")]
+    [Description("Whether the current process may change this setting's server policy.")]
     public bool CanChangeSynchronizationPolicy =>
         SynchronizationPolicyControlState == ConfigSyncPolicyControlState.Available;
 
@@ -228,19 +229,27 @@ public class SyncedConfigEntry<T> : OwnConfigEntryBase
     /// <param name="value">The new local value.</param>
     /// <remarks>
     /// On the server or in a local world this updates the active config entry. On a connected client controlled by
-    /// the server it updates only the saved local fallback, which is restored later. BepInEx itself suppresses
-    /// <c>SettingChanged</c> when the typed value is equal.
+    /// the server it updates only the saved local fallback, which is restored later. Changed fallback values honor
+    /// the config file's SaveOnConfigSet option without notifying active-value subscribers or publishing to the server.
+    /// BepInEx itself suppresses <c>SettingChanged</c> when the typed value is equal.
     /// </remarks>
     [Description("Updates the local fallback without overwriting an active server value on a client.")]
     public void AssignLocalValue(T value)
     {
-        if (!HasLocalBaseValue)
+        if (ConditionalConfigSync.ShouldStoreLocalConfigValue(this))
         {
-            Value = value;
+            bool changed = !HasLocalBaseValue || !EqualityComparer<T>.Default.Equals((T)LocalBaseValue!, value);
+            StoreLocalBaseValue(value);
+            if (changed && SourceConfig.ConfigFile.SaveOnConfigSet)
+            {
+                // GetSerializedValue persists this fallback, including for administrators. Do not
+                // assign the active server value merely to obtain BepInEx's normal autosave effect.
+                SourceConfig.ConfigFile.Save();
+            }
         }
         else
         {
-            StoreLocalBaseValue(value);
+            Value = value;
         }
     }
 }

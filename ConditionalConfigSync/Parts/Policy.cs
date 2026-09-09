@@ -113,8 +113,13 @@ public partial class ConditionalConfigSync
         try
         {
             EnsureConfigDirectory();
-            syncPolicyWatcher ??= CreatePolicyWatcher(SyncPolicyFileName);
-            hiddenConfigsWatcher ??= CreatePolicyWatcher(HiddenConfigsFileName);
+            lock (policyLock)
+            {
+                syncPolicyWatcher ??= CreatePolicyWatcher(SyncPolicyFileName);
+                hiddenConfigsWatcher ??= CreatePolicyWatcher(HiddenConfigsFileName);
+                syncPolicyWatcher.EnableRaisingEvents = true;
+                hiddenConfigsWatcher.EnableRaisingEvents = true;
+            }
         }
         catch (Exception e)
         {
@@ -127,59 +132,100 @@ public partial class ConditionalConfigSync
         FileSystemWatcher watcher = new(ConfigDirectoryPath, fileName)
         {
             NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime | NotifyFilters.FileName,
-            EnableRaisingEvents = true,
         };
-        watcher.Changed += (_, _) => SchedulePolicyReload();
-        watcher.Created += (_, _) => SchedulePolicyReload();
-        watcher.Renamed += (_, _) => SchedulePolicyReload();
-        watcher.Deleted += (_, _) => SchedulePolicyReload();
+        watcher.Changed += (_, _) => SchedulePolicyReload(watcher);
+        watcher.Created += (_, _) => SchedulePolicyReload(watcher);
+        watcher.Renamed += (_, _) => SchedulePolicyReload(watcher);
+        watcher.Deleted += (_, _) => SchedulePolicyReload(watcher);
         return watcher;
     }
 
-    private static void SchedulePolicyReload()
+    private static void SchedulePolicyReload(FileSystemWatcher watcher)
     {
-        long generation;
+        FileSystemWatcher? expectedSyncWatcher;
+        FileSystemWatcher? expectedHiddenWatcher;
         lock (policyLock)
         {
+            if (!policySupportInitialized
+                || !ReferenceEquals(watcher, syncPolicyWatcher) && !ReferenceEquals(watcher, hiddenConfigsWatcher))
+            {
+                return;
+            }
+
+            // Mark every event, including events received while a worker is already reading.
+            // Otherwise an edit to the first file while the second file is read can be lost forever.
+            Interlocked.Increment(ref policyReadGeneration);
             if (policyReloadScheduled)
             {
                 return;
             }
             policyReloadScheduled = true;
-            generation = ++policyReadGeneration;
+            expectedSyncWatcher = syncPolicyWatcher;
+            expectedHiddenWatcher = hiddenConfigsWatcher;
+        }
+
+        bool IsCurrentWatcherSession()
+        {
+            return policySupportInitialized
+                && ReferenceEquals(expectedSyncWatcher, syncPolicyWatcher)
+                && ReferenceEquals(expectedHiddenWatcher, hiddenConfigsWatcher);
         }
 
         ThreadPool.QueueUserWorkItem(_ =>
         {
-            Thread.Sleep(500);
-            if (!TryReadPolicyFiles(
+            for (;;)
+            {
+                Thread.Sleep(500);
+                long generation;
+                lock (policyLock)
+                {
+                    if (!IsCurrentWatcherSession())
+                    {
+                        return;
+                    }
+                    generation = Interlocked.Read(ref policyReadGeneration);
+                }
+
+                bool read = TryReadPolicyFiles(
                     createIfMissing: false,
                     out Dictionary<string, ConfigPolicyOverride> newSyncPolicy,
                     out HashSet<string> newHiddenPolicy,
                     out List<SyncPolicyRecord> syncRecords,
                     out List<HiddenPolicyRecord> hiddenRecords,
-                    out string? error))
-            {
+                    out string? error);
+
                 lock (policyLock)
                 {
+                    if (!IsCurrentWatcherSession())
+                    {
+                        return;
+                    }
+                    if (generation != Interlocked.Read(ref policyReadGeneration))
+                    {
+                        continue;
+                    }
                     policyReloadScheduled = false;
                 }
-                LogSource.LogWarning($"[Policy] Failed to read policy files: {error}");
+
+                if (!read)
+                {
+                    LogSource.LogWarning($"[Policy] Failed to read policy files: {error}");
+                    return;
+                }
+
+                EnqueueMainThread(() => ApplyPolicyFiles(
+                    newSyncPolicy, newHiddenPolicy, syncRecords, hiddenRecords,
+                    quiet: false, source: "policy file watcher", generation: generation));
                 return;
             }
-
-            lock (policyLock)
-            {
-                policyReloadScheduled = false;
-            }
-
-            EnqueueMainThread(() =>
-                ApplyPolicyFiles(newSyncPolicy, newHiddenPolicy, syncRecords, hiddenRecords, quiet: false, source: "policy file watcher", generation: generation));
         });
     }
 
     private static bool LoadPolicyFiles(bool createIfMissing, bool quiet, string source)
     {
+        // Allocate the generation before I/O. A manual read must not label stale contents as newer
+        // than a watcher read or a synchronous read performed by the next network session.
+        long generation = Interlocked.Increment(ref policyReadGeneration);
         if (!TryReadPolicyFiles(
                 createIfMissing,
                 out Dictionary<string, ConfigPolicyOverride> newSyncPolicy,
@@ -192,7 +238,6 @@ public partial class ConditionalConfigSync
             return false;
         }
 
-        long generation = Interlocked.Increment(ref policyReadGeneration);
         if (IsMainThread)
         {
             ApplyPolicyFiles(newSyncPolicy, newHiddenPolicy, syncRecords, hiddenRecords, quiet, source, generation);
@@ -251,8 +296,8 @@ public partial class ConditionalConfigSync
     {
         lock (policyLock)
         {
-            // A policy snapshot can remain queued while ZNet is shutting down. Ignore it when a newer
-            // snapshot was already read and applied during the next server initialization.
+            // Ignore old-session work and snapshots older than the state already applied. A mere
+            // watcher notification must not cancel a synchronous UI/console reload of its own write.
             if (generation < policyAppliedGeneration)
             {
                 return;
@@ -362,7 +407,7 @@ public partial class ConditionalConfigSync
 
     private static void RefreshPolicyStatesForAll(string source, bool broadcast)
     {
-        foreach (ConditionalConfigSync configSync in configSyncs)
+        foreach (ConditionalConfigSync configSync in configSyncs.ToArray())
         {
             configSync.RefreshPolicyStates(source, broadcast);
         }
@@ -414,26 +459,60 @@ public partial class ConditionalConfigSync
             }
         }
 
-        if (changed.Count > 0)
+        long generation = transportGeneration;
+        // Reserve before any lock/policy callback can publish derived state or a sequenced event.
+        SendSlot? reservation = broadcast && isServer && GameReflection.HasZNet && changed.Count > 0
+            ? ReserveSendSlot() : null;
+        bool scheduled = false;
+        ++packagePreparationDepth;
+        try
         {
-            if (isServer)
+            if (changed.Count > 0)
             {
-                InvalidateFullSyncSnapshot($"policy state changed: {source}");
+                if (isServer)
+                {
+                    InvalidateFullSyncSnapshot($"policy state changed: {source}");
+                }
+                if (reservation != null)
+                {
+                    // Seal an older coalescing batch in its original position. Otherwise a handler's
+                    // latest-state update could merge into that earlier batch and bypass this policy slot.
+                    FlushPendingStateBroadcastIfReady(sealBeforeLaterSend: true);
+                }
+                if (generation != transportGeneration)
+                {
+                    return;
+                }
+                ServerLockedSettingChanged();
             }
-            ServerLockedSettingChanged();
-        }
 
-        // Subscribers observe the final policy metadata and read-only state, not an intermediate value.
-        foreach (PolicyStateChangedEventArgs transition in policyTransitions)
-        {
-            RaisePolicyStateEvents(transition);
-        }
+            // Subscribers observe the final policy metadata and read-only state, not an intermediate value.
+            foreach (PolicyStateChangedEventArgs transition in policyTransitions)
+            {
+                if (generation != transportGeneration)
+                {
+                    return;
+                }
+                RaisePolicyStateEvents(transition);
+            }
 
-        if (broadcast && isServer && GameReflection.HasZNet && changed.Count > 0)
+            if (reservation != null && IsCurrentSend(reservation))
+            {
+                // Capture canonical values after handlers while retaining the earlier FIFO position.
+                scheduled = StartBroadcastPackage(
+                    GameReflection.Everybody,
+                    () => ConfigsToPackage(changed.Select(c => c.BaseConfig), includeConfigValues: true, includeAllProvidedConfigStates: true),
+                    reservation: reservation);
+            }
+        }
+        finally
         {
-            StartBroadcastPackage(
-                GameReflection.Everybody,
-                ConfigsToPackage(changed.Select(c => c.BaseConfig), includeConfigValues: true, includeAllProvidedConfigStates: true));
+            --packagePreparationDepth;
+            if (!scheduled && reservation != null)
+            {
+                ReleaseSendSlot(reservation);
+            }
+            FlushPendingBroadcastsForAllIfIdle();
         }
     }
 

@@ -71,15 +71,16 @@ public partial class ConditionalConfigSync
         try
         {
             EnsureConfigDirectory();
-            debugConfigWatcher = new FileSystemWatcher(ConfigDirectoryPath, DebugConfigFileName)
+            FileSystemWatcher watcher = new(ConfigDirectoryPath, DebugConfigFileName)
             {
                 NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.CreationTime | NotifyFilters.FileName,
-                EnableRaisingEvents = true,
             };
-            debugConfigWatcher.Changed += (_, _) => ScheduleDebugConfigReload();
-            debugConfigWatcher.Created += (_, _) => ScheduleDebugConfigReload();
-            debugConfigWatcher.Renamed += (_, _) => ScheduleDebugConfigReload();
-            debugConfigWatcher.Deleted += (_, _) => ScheduleDebugConfigReload();
+            watcher.Changed += (_, _) => ScheduleDebugConfigReload(watcher);
+            watcher.Created += (_, _) => ScheduleDebugConfigReload(watcher);
+            watcher.Renamed += (_, _) => ScheduleDebugConfigReload(watcher);
+            watcher.Deleted += (_, _) => ScheduleDebugConfigReload(watcher);
+            debugConfigWatcher = watcher;
+            watcher.EnableRaisingEvents = true;
         }
         catch (Exception e)
         {
@@ -87,11 +88,11 @@ public partial class ConditionalConfigSync
         }
     }
 
-    private static void ScheduleDebugConfigReload()
+    private static void ScheduleDebugConfigReload(FileSystemWatcher watcher)
     {
         lock (debugSupportLock)
         {
-            if (debugConfigReloadScheduled)
+            if (!debugSupportInitialized || !ReferenceEquals(watcher, debugConfigWatcher) || debugConfigReloadScheduled)
             {
                 return;
             }
@@ -103,9 +104,23 @@ public partial class ConditionalConfigSync
             Thread.Sleep(500);
             lock (debugSupportLock)
             {
-                debugConfigReloadScheduled = false;
+                if (!debugSupportInitialized || !ReferenceEquals(watcher, debugConfigWatcher))
+                {
+                    return;
+                }
+
+                // Keep one reader through publication. Events during the debounce are included by
+                // this read; events during the read acquire this lock afterwards and schedule another.
+                // Shutdown uses the same lock, so an old reader cannot republish after cleanup.
+                try
+                {
+                    LoadDebugConfig(createIfMissing: false, quiet: false);
+                }
+                finally
+                {
+                    debugConfigReloadScheduled = false;
+                }
             }
-            LoadDebugConfig(createIfMissing: false, quiet: false);
         });
     }
 
@@ -207,7 +222,8 @@ public partial class ConditionalConfigSync
 
     private static ConditionalConfigSyncDebugLevel ReadDebugLevel(string? raw, ConditionalConfigSyncDebugLevel fallback)
     {
-        return Enum.TryParse(raw, ignoreCase: true, out ConditionalConfigSyncDebugLevel level) ? level : fallback;
+        return Enum.TryParse(raw, ignoreCase: true, out ConditionalConfigSyncDebugLevel level)
+            && Enum.IsDefined(typeof(ConditionalConfigSyncDebugLevel), level) ? level : fallback;
     }
 
     private static bool IsDebugActive => DebugLoggingEnabled || debugConfigEnabled;
@@ -407,9 +423,15 @@ public partial class ConditionalConfigSync
             return;
         }
 
+        long generation = transportGeneration;
         InitialSyncDone = true;
         ServerLockedSettingChanged();
+        if (!sessionActive || generation != transportGeneration || !InitialSyncDone)
+        {
+            return;
+        }
         InvokeEventHandlers(InitialSyncCompleted, nameof(InitialSyncCompleted));
+        ScheduleLateRegistrationSync();
     }
 
     private void RaisePolicyStateEvents(

@@ -189,7 +189,7 @@ public partial class ConditionalConfigSync
             IsSourceOfTruth = false;
             ServerLockedSettingChanged();
             bool connectedPeerFound = false;
-            foreach (ZNetPeer peer in GameReflection.GetPeers())
+            foreach (ZNetPeer peer in GameReflection.GetPeers().ToArray())
             {
                 RegisterClientRpcHandler(peer);
                 connectedPeerFound = true;
@@ -207,8 +207,10 @@ public partial class ConditionalConfigSync
 
     internal void UseLocalStateForMissingOptionalServer()
     {
-        if (isServer || IsSourceOfTruth || ModRequired)
+        if (isServer || IsSourceOfTruth || ModRequired || InitialSyncDone || initialSyncRepairRequested)
         {
+            // Actual synchronization data can arrive from a provider registered after the version handshake.
+            // Do not undo a received full snapshot or an in-flight initial repair for that provider.
             return;
         }
 
@@ -241,6 +243,7 @@ public partial class ConditionalConfigSync
         finally
         {
             ProcessingServerUpdate = wasProcessingServerUpdate;
+            FlushPendingBroadcastsForAllIfIdle();
         }
     }
 
@@ -484,71 +487,113 @@ public partial class ConditionalConfigSync
         return false;
     }
 
-    private IEnumerator SendFullSyncPackage(ZNetPeer peer, string area, string action)
+    private IEnumerator SendFullSyncPackage(ZNetPeer peer, string area, string action, SendSlot? reservation = null)
     {
-        FullSyncSnapshot? snapshot;
-        bool cacheHit;
-        while (!TryGetOrCreateFullSyncSnapshot(peer, out snapshot, out cacheHit))
+        SendSlot? slot = reservation;
+        IEnumerator? sender = null;
+        try
         {
-            DebugLog(
-                ConditionalConfigSyncDebugLevel.Verbose,
-                "Snapshot",
-                $"Full-sync state changed during all {FullSyncSnapshotBuildAttempts} build attempts; waiting for {FullSyncSnapshotStableFrames} stable frames before retrying.");
-
-            FullSyncSnapshotKey observedKey = CaptureFullSyncSnapshotKey(IsPeerAdmin(peer));
-            int stableFrames = 0;
-            while (stableFrames < FullSyncSnapshotStableFrames)
+            if (!sessionActive || !GameReflection.HasZNet || !GameReflection.IsPeerReady(peer))
+            {
+                yield break;
+            }
+            slot ??= ReserveSendSlot();
+            if (slot == null)
+            {
+                yield break;
+            }
+            ZRpc rpc = GameReflection.GetPeerRpc(peer);
+            while (IsCurrentPeerSend(peer, rpc, slot)
+                && (sendQueue.First != slot.Node || ProcessingServerUpdate || IsProcessing || packagePreparationDepth > 0))
             {
                 yield return null;
-                if (!sessionActive || !GameReflection.HasZNet || !GameReflection.IsPeerReady(peer))
+            }
+            if (!IsCurrentPeerSend(peer, rpc, slot))
+            {
+                yield break;
+            }
+
+            FullSyncSnapshot? snapshot;
+            bool cacheHit;
+            for (;;)
+            {
+                bool built;
+                ++packagePreparationDepth;
+                try
+                {
+                    built = TryGetOrCreateFullSyncSnapshot(peer, out snapshot, out cacheHit);
+                }
+                finally
+                {
+                    --packagePreparationDepth;
+                }
+                if (!IsCurrentPeerSend(peer, rpc, slot))
                 {
                     yield break;
                 }
-
-                FullSyncSnapshotKey currentKey = CaptureFullSyncSnapshotKey(IsPeerAdmin(peer));
-                if (currentKey.Equals(observedKey))
+                if (built)
                 {
-                    ++stableFrames;
+                    break;
                 }
-                else
+
+                DebugLog(
+                    ConditionalConfigSyncDebugLevel.Verbose,
+                    "Snapshot",
+                    $"Full-sync state changed during all {FullSyncSnapshotBuildAttempts} build attempts; waiting for {FullSyncSnapshotStableFrames} stable frames before retrying.");
+
+                FullSyncSnapshotKey observedKey = CaptureFullSyncSnapshotKey(IsPeerAdmin(peer));
+                int stableFrames = 0;
+                while (stableFrames < FullSyncSnapshotStableFrames)
                 {
-                    observedKey = currentKey;
-                    stableFrames = 0;
+                    yield return null;
+                    if (!IsCurrentPeerSend(peer, rpc, slot))
+                    {
+                        yield break;
+                    }
+
+                    FullSyncSnapshotKey currentKey = CaptureFullSyncSnapshotKey(IsPeerAdmin(peer));
+                    if (currentKey.Equals(observedKey))
+                    {
+                        ++stableFrames;
+                    }
+                    else
+                    {
+                        observedKey = currentKey;
+                        stableFrames = 0;
+                    }
                 }
             }
-        }
 
-        DebugLog(
-            ConditionalConfigSyncDebugLevel.Basic,
-            area,
-            $"{action} {FormatPeer(peer)}, admin={snapshot!.Key.Admin}, configs={snapshot.Key.ConfigCount}, custom={snapshot.Key.CustomValueCount}, " +
-            $"raw={FormatByteCount(snapshot.RawSize)}, wire={FormatByteCount(snapshot.WireSize)}, " +
-            $"snapshot={(cacheHit ? "reused" : "built")}, revision={snapshot.Key.Revision}");
+            DebugLog(
+                ConditionalConfigSyncDebugLevel.Basic,
+                area,
+                $"{action} {FormatPeer(peer)}, admin={snapshot!.Key.Admin}, configs={snapshot.Key.ConfigCount}, custom={snapshot.Key.CustomValueCount}, " +
+                $"raw={FormatByteCount(snapshot.RawSize)}, wire={FormatByteCount(snapshot.WireSize)}, " +
+                $"snapshot={(cacheHit ? "reused" : "built")}, revision={snapshot.Key.Revision}");
 
-        if (snapshot.RawSize > maxPayloadSize)
-        {
-            RejectSync(
-                $"Rejected outgoing synchronization package: serialized payload is {snapshot.RawSize} bytes, limit is {maxPayloadSize} bytes.",
-                null,
-                incoming: false);
-            yield break;
-        }
-        if (snapshot.WireSize > maxPayloadSize)
-        {
-            RejectSync(
-                $"Rejected outgoing prepared package: payload is {snapshot.WireSize} bytes, limit is {maxPayloadSize} bytes.",
-                null,
-                incoming: false);
-            yield break;
-        }
+            if (snapshot.RawSize > maxPayloadSize)
+            {
+                RejectSync(
+                    $"Rejected outgoing synchronization package: serialized payload is {snapshot.RawSize} bytes, limit is {maxPayloadSize} bytes.",
+                    null,
+                    incoming: false);
+                yield break;
+            }
+            if (snapshot.WireSize > maxPayloadSize)
+            {
+                RejectSync(
+                    $"Rejected outgoing prepared package: payload is {snapshot.WireSize} bytes, limit is {maxPayloadSize} bytes.",
+                    null,
+                    incoming: false);
+                yield break;
+            }
 
-        IEnumerator sender = SendZPackage(
-            new List<ZNetPeer> { peer },
-            GameReflection.NewPackage(snapshot.WireBytes),
-            packagePrepared: true,
-            rawSizeHint: snapshot.RawSize);
-        try
-        {
+            sender = SendZPackage(
+                new List<ZNetPeer> { peer },
+                GameReflection.NewPackage(snapshot.WireBytes),
+                packagePrepared: true,
+                rawSizeHint: snapshot.RawSize,
+                reservation: slot);
             while (sender.MoveNext())
             {
                 yield return sender.Current;
@@ -557,6 +602,10 @@ public partial class ConditionalConfigSync
         finally
         {
             (sender as IDisposable)?.Dispose();
+            if (slot != null)
+            {
+                ReleaseSendSlot(slot);
+            }
         }
     }
 
@@ -567,10 +616,10 @@ public partial class ConditionalConfigSync
 
     private void ScheduleLateRegistrationSync(OwnConfigEntryBase? config = null, CustomSyncedValueBase? customValue = null)
     {
-        // Registrations completed before a network session are part of the normal initial package and must not remain
-        // in the late-registration batch. A client that has not completed its first full sync also needs no separate
-        // batch because that package (or the explicit first resync for a late-created ConfigSync) includes all values.
-        if (!sessionActive || !GameReflection.HasZNet || (!isServer && !InitialSyncDone))
+        // Registrations before a network session belong to the normal initial snapshot. Registrations
+        // during parsing/application are retained until initial completion: the current lookup maps
+        // cannot contain an entry created by a callback while that package is already being applied.
+        if (!sessionActive || !GameReflection.HasZNet)
         {
             return;
         }
@@ -584,13 +633,21 @@ public partial class ConditionalConfigSync
             lateRegisteredCustomValues.Add(customValue);
         }
 
-        if (lateRegistrationSyncScheduled)
+        if ((!isServer && !InitialSyncDone) || lateRegistrationSyncScheduled
+            || lateRegisteredConfigs.Count == 0 && lateRegisteredCustomValues.Count == 0)
         {
             return;
         }
 
         lateRegistrationSyncScheduled = true;
-        QueueMainThread(FlushLateRegistrationSync);
+        long generation = transportGeneration;
+        QueueMainThread(() =>
+        {
+            if (generation == transportGeneration)
+            {
+                FlushLateRegistrationSync();
+            }
+        });
     }
 
     private void FlushLateRegistrationSync()
@@ -618,28 +675,30 @@ public partial class ConditionalConfigSync
                 return;
             }
 
-            ZPackage package = ConfigsToPackage(
-                configs: configs,
-                customValues: customValues,
-                partial: true,
-                includeConfigValues: true,
-                includeAllProvidedConfigStates: true);
             DebugLog(
                 ConditionalConfigSyncDebugLevel.Basic,
                 "LateRegistration",
                 $"Broadcasting late registrations: configs={configs.Length}, custom={customValues.Length}");
-            StartBroadcastPackage(GameReflection.Everybody, package);
+            StartBroadcastPackage(GameReflection.Everybody, () => ConfigsToPackage(
+                configs: configs,
+                customValues: customValues,
+                partial: true,
+                includeConfigValues: true,
+                includeAllProvidedConfigStates: true));
         }
-        else
+        else if (InitialSyncDone)
         {
-            lateRegisteredConfigs.Clear();
-            lateRegisteredCustomValues.Clear();
-            RequestFullSync();
+            if (RequestFullSync())
+            {
+                lateRegisteredConfigs.Clear();
+                lateRegisteredCustomValues.Clear();
+            }
         }
     }
 
     private void ResetSessionRegistrationState()
     {
+        ResetTransportState();
         serverRpcsRegistered = false;
         registeredClientRpcs.Clear();
         lateRegisteredConfigs.Clear();
@@ -763,7 +822,7 @@ public partial class ConditionalConfigSync
     private static void ResetNetworkSessionState()
     {
         sessionActive = false;
-        foreach (ConditionalConfigSync sync in configSyncs)
+        foreach (ConditionalConfigSync sync in configSyncs.ToArray())
         {
             sync.ResetSessionRegistrationState();
         }
@@ -773,6 +832,7 @@ public partial class ConditionalConfigSync
 
         lock (mainThreadQueueLock)
         {
+            ++mainThreadQueueGeneration;
             mainThreadQueue.Clear();
         }
     }

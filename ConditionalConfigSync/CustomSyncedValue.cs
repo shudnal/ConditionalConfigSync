@@ -4,6 +4,23 @@ using System.ComponentModel;
 
 namespace ConditionalConfigSync;
 
+public partial class ConditionalConfigSync
+{
+    internal bool CanAcceptActiveCustomValueChange(CustomSyncedValueBase customValue)
+    {
+        if (customValuesBeingApplied.Contains(customValue) || IsSourceOfTruth || CanBroadcastFromThisSide())
+        {
+            return true;
+        }
+
+        string reason = !InitialSyncDone
+            ? "initial server synchronization is not complete"
+            : "the local side is not authorized to publish active custom values";
+        DebugWarning("CustomValue", $"Rejected local change to protected custom value {customValue.Identifier}: {reason}");
+        return false;
+    }
+}
+
 /// <summary>
 /// Non-generic base for runtime values synchronized independently from BepInEx config files.
 /// </summary>
@@ -14,12 +31,36 @@ namespace ConditionalConfigSync;
 [Description("Base class for runtime values synchronized independently from BepInEx config files.")]
 public abstract class CustomSyncedValueBase
 {
+    private sealed class PendingPublication
+    {
+        internal readonly CustomSyncedValueBase Value;
+        internal readonly object? SequencedValueSnapshot;
+
+        internal PendingPublication(CustomSyncedValueBase value, object? sequencedValueSnapshot)
+        {
+            Value = value;
+            SequencedValueSnapshot = sequencedValueSnapshot;
+        }
+    }
+
+    [ThreadStatic]
+    private static int notificationDepth;
+
+    [ThreadStatic]
+    private static List<PendingPublication>? pendingPublications;
+
+    [ThreadStatic]
+    private static HashSet<CustomSyncedValueBase>? pendingStatePublications;
+
+    private readonly ConditionalConfigSync owner;
+
     /// <summary>
     /// Raised after the active value is applied or explicitly re-notified.
     /// </summary>
     /// <remarks>
     /// ConditionalConfigSync also listens to this event to publish changes. Avoid assigning the same value recursively
     /// from the handler. Use <see cref="NotifyChanged"/> after mutating a reference-type value in place.
+    /// Subscriber exceptions are logged individually and do not prevent later subscribers from running.
     /// </remarks>
     [Description("Raised when the active value is applied or explicitly re-notified.")]
     public event Action? ValueChanged;
@@ -28,7 +69,7 @@ public abstract class CustomSyncedValueBase
     /// Compatibility alias for <see cref="NotifyChanged"/>. Re-publishes and re-processes the current active value.
     /// </summary>
     [Description("Compatibility alias for NotifyChanged. Re-processes and republishes the current value.")]
-    public void Update() => ValueChanged?.Invoke();
+    public void Update() => NotifyChanged();
 
     /// <summary>
     /// Explicitly notifies subscribers that the current value must be processed again.
@@ -44,7 +85,83 @@ public abstract class CustomSyncedValueBase
     /// </example>
     /// </remarks>
     [Description("Forces subscribers and synchronization to process the current value again.")]
-    public void NotifyChanged() => ValueChanged?.Invoke();
+    public void NotifyChanged() => RaiseValueChanged();
+
+    private void RaiseValueChanged()
+    {
+        if (!hasBoxedValue || !owner.CanAcceptActiveCustomValueChange(this))
+        {
+            return;
+        }
+
+        List<PendingPublication> publications = pendingPublications ??= new List<PendingPublication>();
+        if (PreserveUpdateSequence)
+        {
+            // A sequenced value represents events, so every notification owns the payload that existed
+            // when that notification started, even if a handler immediately assigns a follow-up event.
+            publications.Add(new PendingPublication(this, boxedValue));
+        }
+        else if ((pendingStatePublications ??= new HashSet<CustomSyncedValueBase>()).Add(this))
+        {
+            // A state value keeps the ordering position of its first notification in this cascade but
+            // publishes the settled active value after all synchronous normalization callbacks finish.
+            publications.Add(new PendingPublication(this, null));
+        }
+
+        Action? handlers = ValueChanged;
+        ++notificationDepth;
+        try
+        {
+            if (handlers != null)
+            {
+                foreach (Action handler in handlers.GetInvocationList())
+                {
+                    try
+                    {
+                        handler();
+                    }
+                    catch (Exception e)
+                    {
+                        owner.ReportCustomValueSubscriberFailure(Identifier, e);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            --notificationDepth;
+            if (notificationDepth == 0)
+            {
+                FlushPendingPublications();
+            }
+        }
+    }
+
+    private static void FlushPendingPublications()
+    {
+        List<PendingPublication>? publications = pendingPublications;
+        pendingPublications = null;
+        pendingStatePublications = null;
+        if (publications == null || publications.Count == 0)
+        {
+            return;
+        }
+
+        foreach (PendingPublication publication in publications)
+        {
+            object? publicationValue = publication.Value.PreserveUpdateSequence
+                ? publication.SequencedValueSnapshot
+                : publication.Value.BoxedValue;
+            try
+            {
+                publication.Value.owner.PublishCustomValueChange(publication.Value, publicationValue);
+            }
+            catch (Exception e)
+            {
+                publication.Value.owner.ReportCustomValuePublicationFailure(publication.Value.Identifier, e);
+            }
+        }
+    }
 
     /// <summary>
     /// The local fallback retained by a client while a server value is active.
@@ -72,6 +189,27 @@ public abstract class CustomSyncedValueBase
     private object? boxedValue;
     private bool hasBoxedValue;
 
+    /// <summary>Initializes construction-time state without notifying subscribers or publishing it.</summary>
+    /// <param name="value">The initial local value.</param>
+    /// <remarks>
+    /// Use only from derived constructors, including constructors in consumer assemblies. This path also establishes
+    /// the initial local fallback on a replica. Use it for every construction-time assignment when initialization has
+    /// several steps; use <see cref="AssignBoxedValue"/> or the typed assignment methods for subsequent runtime changes.
+    /// Late registration still supplies the initial server publication or requests the authoritative client snapshot.
+    /// </remarks>
+    protected internal void InitializeBoxedValue(object? value)
+    {
+        // Registration is already scheduled by the base constructor. Initial local data is not a
+        // publication, even for an administrator or a sequenced value registered during a session.
+        boxedValue = value;
+        hasBoxedValue = true;
+        StoreLastAcceptedValue(value);
+        if (!localIsOwner)
+        {
+            StoreLocalBaseValue(value);
+        }
+    }
+
     /// <summary>
     /// Gets or sets the active value through the non-generic API.
     /// </summary>
@@ -92,18 +230,31 @@ public abstract class CustomSyncedValueBase
     /// </summary>
     /// <param name="value">The candidate active value.</param>
     /// <param name="notifyIfEqual">When true, notify even if the configured comparer reports equality.</param>
-    /// <returns>True when the value was accepted and <see cref="ValueChanged"/> was raised.</returns>
-    /// <remarks>Intended for custom derived value types. Most mods should use the typed public assignment methods.</remarks>
+    /// <returns>True when the value was accepted and <see cref="ValueChanged"/> was raised; false for initialization.</returns>
+    /// <remarks>
+    /// Intended for custom derived value types. The first assignment initializes silently, so existing subclasses
+    /// that initialize through this method do not publish their constructor argument. For multi-step constructor
+    /// initialization, use <see cref="InitializeBoxedValue"/> for each step. Most mods should use typed public assignments.
+    /// </remarks>
     protected bool AssignBoxedValue(object? value, bool notifyIfEqual)
     {
-        if (hasBoxedValue && BoxedValuesEqual(boxedValue, value) && !notifyIfEqual)
+        if (!hasBoxedValue)
+        {
+            InitializeBoxedValue(value);
+            return false;
+        }
+        if (BoxedValuesEqual(boxedValue, value) && !notifyIfEqual)
+        {
+            return false;
+        }
+        if (!owner.CanAcceptActiveCustomValueChange(this))
         {
             return false;
         }
 
         boxedValue = value;
         hasBoxedValue = true;
-        ValueChanged?.Invoke();
+        RaiseValueChanged();
         return true;
     }
 
@@ -111,6 +262,8 @@ public abstract class CustomSyncedValueBase
     /// True when the local side currently owns and may publish this value.
     /// </summary>
     protected bool localIsOwner;
+
+    internal void SetLocalOwnership(bool isOwner) => localIsOwner = isOwner;
 
     /// <summary>
     /// Ordering priority used when several custom values are batched or flushed together. Higher values come first.
@@ -135,13 +288,13 @@ public abstract class CustomSyncedValueBase
     /// <param name="priority">Batch ordering priority. Higher values come first.</param>
     protected CustomSyncedValueBase(ConditionalConfigSync configSync, string identifier, Type type, int priority)
     {
+        owner = configSync ?? throw new ArgumentNullException(nameof(configSync));
         Priority = priority;
         Identifier = identifier;
         Type = type;
         RegistrationIndex = ++nextRegistrationIndex;
-        configSync.AddCustomValue(this);
         localIsOwner = configSync.IsSourceOfTruth;
-        configSync.SourceOfTruthChanged += truth => localIsOwner = truth;
+        configSync.AddCustomValue(this);
     }
 
     internal void StoreLocalBaseValue(object? value)
@@ -222,7 +375,7 @@ public class CustomSyncedValue<T> : CustomSyncedValueBase
     /// <param name="configSync">The synchronization instance that owns this value.</param>
     /// <param name="identifier">A unique stable name within <paramref name="configSync"/>.</param>
     /// <param name="value">Initial local value.</param>
-    /// <param name="priority">Batch ordering priority. Higher values are processed before lower values.</param>
+    /// <param name="priority">Batch ordering priority. Higher values come first.</param>
     /// <param name="valueComparer">
     /// Optional equality comparer. It controls duplicate suppression for local assignments and received values. Supply a
     /// content comparer for arrays, lists, dictionaries, or domain objects when reference equality is not sufficient.
@@ -238,8 +391,7 @@ public class CustomSyncedValue<T> : CustomSyncedValueBase
     public CustomSyncedValue(ConditionalConfigSync configSync, string identifier, T value = default!, int priority = 0, IEqualityComparer<T>? valueComparer = null) : base(configSync, identifier, typeof(T), priority)
     {
         this.valueComparer = valueComparer ?? EqualityComparer<T>.Default;
-        Value = value;
-        StoreLastAcceptedValue(BoxedValue);
+        InitializeBoxedValue(value);
     }
 
     /// <summary>
@@ -273,7 +425,7 @@ public class CustomSyncedValue<T> : CustomSyncedValueBase
     /// watchers, or repeated recalculation where only changed state should trigger handlers and network traffic.
     /// <example>
     /// <code>
-    /// settingsJson.AssignLocalValueIfChanged(File.ReadAllText(path));
+    /// settingsJson.AssignLocalValueIfChanged(ReadSettings());
     /// </code>
     /// </example>
     /// </remarks>
@@ -331,7 +483,7 @@ public class CustomSyncedValue<T> : CustomSyncedValueBase
 /// <remarks>
 /// A normal <see cref="CustomSyncedValue{T}"/> represents the latest state and may coalesce pending updates. A sequenced
 /// value snapshots every deferred assignment into its own package. Use it for commands, pulses, combat events, or any
-/// message where <c>A, A</c> means two events rather than one state. Do not use it merely to force initial processing;
+/// message where <c>A, A</c> means two events rather than one state. Do not use it merely to force initial state processing;
 /// use <see cref="CustomSyncedValue{T}.AssignLocalValueAndNotify(T)"/> for that.
 /// <example>
 /// <code>
@@ -354,10 +506,10 @@ public sealed class SequencedCustomSyncedValue<T> : CustomSyncedValue<T>
     /// <summary>
     /// Creates an event-like custom synchronized value that preserves every assignment.
     /// </summary>
-    /// <param name="configSync">The synchronization instance that owns this value.</param>
-    /// <param name="identifier">A unique stable name within <paramref name="configSync"/>.</param>
+    /// <param name="configSync">The synchronization instance that owns the value.</param>
+    /// <param name="identifier">A unique stable name within the synchronization instance.</param>
     /// <param name="value">Initial local payload value.</param>
-    /// <param name="priority">Batch ordering priority. Higher values are processed before lower values.</param>
+    /// <param name="priority">Batch ordering priority. Higher values come first.</param>
     /// <param name="valueComparer">
     /// Optional comparer used only by explicit change-checking operations such as
     /// <see cref="CustomSyncedValue{T}.AssignLocalValueIfChanged(T)"/>. Normal sequenced assignment does not suppress equality.
