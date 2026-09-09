@@ -18,7 +18,7 @@ This preserves ordered send-slot cleanup and also avoids useless serialization i
 
 Every sequenced notification now stores the payload reference/value that existed when that notification started. Ordinary state values instead reserve one publication position at their first notification in a nested callback cascade and publish the settled final active value from that position.
 
-The internal CCS publisher is no longer installed as a hidden `ValueChanged` subscriber. `CustomSyncedValueBase` invokes consumer subscribers with exception isolation, then calls the owning synchronization instance explicitly at the outermost completion boundary. Sequenced value assignments such as `1` followed reentrantly by `2` therefore publish `1, 2`, while an ordinary state normalization coalesces to its final value without moving behind nested events.
+The internal CCS publisher is no longer installed as a hidden `ValueChanged` subscriber. `ValueChanged` contains only consumer subscriptions; `CustomSyncedValueBase` invokes those subscribers with exception isolation and then calls the owning synchronization instance explicitly at the outermost completion boundary. Sequenced value assignments such as `1` followed reentrantly by `2` therefore publish `1, 2`, while an ordinary state normalization coalesces to its final value without moving behind nested events.
 
 For mutable reference-type sequenced payloads the recorded object is the assigned reference, not a deep clone. The protocol/API does not define a general deep-copy mechanism; mods requiring immutable event snapshots should use immutable/value payloads or their own serialized snapshot type. No new cloning behavior is introduced in this maintenance pass.
 
