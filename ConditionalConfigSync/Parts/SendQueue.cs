@@ -135,9 +135,9 @@ public partial class ConditionalConfigSync
         }
     }
 
-    private void FlushPendingStateBroadcastIfReady()
+    private void FlushPendingStateBroadcastIfReady(bool sealBeforeLaterSend = false)
     {
-        if (pendingStateSendSlot is not { } slot || sendQueue.First != slot.Node)
+        if (pendingStateSendSlot is not { } slot || !sealBeforeLaterSend && sendQueue.First != slot.Node)
         {
             return;
         }
@@ -158,8 +158,8 @@ public partial class ConditionalConfigSync
                 return;
             }
 
-            // Keep state coalesced until its reserved turn. If a batch converter fails, its
-            // healthy entries must still occupy this position, ahead of later events/snapshots.
+            // Coalesce until the reserved turn or an explicit policy boundary seals this batch.
+            // A failed converter must leave healthy entries before later events/snapshots in either case.
             fallbackBarrier = ReserveSendSlot(before: slot.Node!.Next);
             if (fallbackBarrier == null)
             {

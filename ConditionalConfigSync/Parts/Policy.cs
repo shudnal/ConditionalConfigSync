@@ -459,26 +459,60 @@ public partial class ConditionalConfigSync
             }
         }
 
-        if (changed.Count > 0)
+        long generation = transportGeneration;
+        // Reserve before any lock/policy callback can publish derived state or a sequenced event.
+        SendSlot? reservation = broadcast && isServer && GameReflection.HasZNet && changed.Count > 0
+            ? ReserveSendSlot() : null;
+        bool scheduled = false;
+        ++packagePreparationDepth;
+        try
         {
-            if (isServer)
+            if (changed.Count > 0)
             {
-                InvalidateFullSyncSnapshot($"policy state changed: {source}");
+                if (isServer)
+                {
+                    InvalidateFullSyncSnapshot($"policy state changed: {source}");
+                }
+                if (reservation != null)
+                {
+                    // Seal an older coalescing batch in its original position. Otherwise a handler's
+                    // latest-state update could merge into that earlier batch and bypass this policy slot.
+                    FlushPendingStateBroadcastIfReady(sealBeforeLaterSend: true);
+                }
+                if (generation != transportGeneration)
+                {
+                    return;
+                }
+                ServerLockedSettingChanged();
             }
-            ServerLockedSettingChanged();
-        }
 
-        // Subscribers observe the final policy metadata and read-only state, not an intermediate value.
-        foreach (PolicyStateChangedEventArgs transition in policyTransitions)
-        {
-            RaisePolicyStateEvents(transition);
-        }
+            // Subscribers observe the final policy metadata and read-only state, not an intermediate value.
+            foreach (PolicyStateChangedEventArgs transition in policyTransitions)
+            {
+                if (generation != transportGeneration)
+                {
+                    return;
+                }
+                RaisePolicyStateEvents(transition);
+            }
 
-        if (broadcast && isServer && GameReflection.HasZNet && changed.Count > 0)
+            if (reservation != null && IsCurrentSend(reservation))
+            {
+                // Capture canonical values after handlers while retaining the earlier FIFO position.
+                scheduled = StartBroadcastPackage(
+                    GameReflection.Everybody,
+                    () => ConfigsToPackage(changed.Select(c => c.BaseConfig), includeConfigValues: true, includeAllProvidedConfigStates: true),
+                    reservation: reservation);
+            }
+        }
+        finally
         {
-            StartBroadcastPackage(
-                GameReflection.Everybody,
-                () => ConfigsToPackage(changed.Select(c => c.BaseConfig), includeConfigValues: true, includeAllProvidedConfigStates: true));
+            --packagePreparationDepth;
+            if (!scheduled && reservation != null)
+            {
+                ReleaseSendSlot(reservation);
+            }
+            FlushPendingBroadcastsForAllIfIdle();
         }
     }
 
