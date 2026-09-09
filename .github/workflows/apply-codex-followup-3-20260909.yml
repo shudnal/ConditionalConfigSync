@@ -1,0 +1,436 @@
+name: Apply third Codex follow-up corrections
+
+on:
+  push:
+    branches:
+      - fix/full-repository-review-20260908
+    paths:
+      - .github/workflows/apply-codex-followup-3-20260909.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.repository == 'shudnal/ConditionalConfigSync' && github.ref == 'refs/heads/fix/full-repository-review-20260908'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply reviewed source corrections
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def replace_once(path, old, new):
+              file = Path(path)
+              text = file.read_text(encoding='utf-8')
+              count = text.count(old)
+              if count != 1:
+                  raise RuntimeError(f'{path}: expected one replacement target, found {count}')
+              file.write_text(text.replace(old, new, 1), encoding='utf-8', newline='\n')
+
+          # 1. Publish custom values only after the complete nested consumer-notification cascade.
+          custom_path = 'ConditionalConfigSync/CustomSyncedValue.cs'
+          replace_once(
+              custom_path,
+              'public abstract class CustomSyncedValueBase\n{\n    private readonly ConditionalConfigSync owner;\n',
+              '''public abstract class CustomSyncedValueBase
+{
+    private sealed class PendingPublication
+    {
+        internal readonly CustomSyncedValueBase Value;
+        internal readonly Action Publisher;
+
+        internal PendingPublication(CustomSyncedValueBase value, Action publisher)
+        {
+            Value = value;
+            Publisher = publisher;
+        }
+    }
+
+    [ThreadStatic]
+    private static int notificationDepth;
+
+    [ThreadStatic]
+    private static List<PendingPublication>? pendingPublications;
+
+    private readonly ConditionalConfigSync owner;
+''')
+
+          old_raise = '''    private void RaiseValueChanged()
+    {
+        Action? handlers = ValueChanged;
+        if (!hasBoxedValue || handlers == null)
+        {
+            return;
+        }
+
+        foreach (Action handler in handlers.GetInvocationList())
+        {
+            try
+            {
+                handler();
+            }
+            catch (Exception e)
+            {
+                owner.ReportCustomValueSubscriberFailure(Identifier, e);
+            }
+        }
+    }
+'''
+          new_raise = '''    private void RaiseValueChanged()
+    {
+        Action? handlers = ValueChanged;
+        if (!hasBoxedValue || handlers == null)
+        {
+            return;
+        }
+
+        Delegate[] invocationList = handlers.GetInvocationList();
+        if (invocationList.Length == 0)
+        {
+            return;
+        }
+
+        // AddCustomValue installs the CCS publisher before a derived constructor can attach consumer handlers.
+        // Keep that internal callback out of the consumer phase so normalization/reentrant callbacks can settle
+        // the active value first. Publication is flushed after the outermost nested notification returns.
+        Action publisher = (Action)invocationList[0];
+        (pendingPublications ??= new List<PendingPublication>()).Add(new PendingPublication(this, publisher));
+        ++notificationDepth;
+        try
+        {
+            for (int index = 1; index < invocationList.Length; ++index)
+            {
+                try
+                {
+                    ((Action)invocationList[index])();
+                }
+                catch (Exception e)
+                {
+                    owner.ReportCustomValueSubscriberFailure(Identifier, e);
+                }
+            }
+        }
+        finally
+        {
+            --notificationDepth;
+            if (notificationDepth == 0)
+            {
+                FlushPendingPublications();
+            }
+        }
+    }
+
+    private static void FlushPendingPublications()
+    {
+        List<PendingPublication>? publications = pendingPublications;
+        pendingPublications = null;
+        if (publications == null || publications.Count == 0)
+        {
+            return;
+        }
+
+        // Latest-state values publish at their last occurrence in the notification cascade. Sequenced
+        // values retain every notification in invocation order. Publishers read the now-canonical active
+        // value, so normalization callbacks cannot expose a pre-normalized intermediate payload.
+        Dictionary<CustomSyncedValueBase, int> lastStatePublication = new();
+        for (int index = 0; index < publications.Count; ++index)
+        {
+            if (!publications[index].Value.PreserveUpdateSequence)
+            {
+                lastStatePublication[publications[index].Value] = index;
+            }
+        }
+
+        for (int index = 0; index < publications.Count; ++index)
+        {
+            PendingPublication publication = publications[index];
+            if (!publication.Value.PreserveUpdateSequence && lastStatePublication[publication.Value] != index)
+            {
+                continue;
+            }
+
+            try
+            {
+                publication.Publisher();
+            }
+            catch (Exception e)
+            {
+                publication.Value.owner.ReportCustomValueSubscriberFailure(publication.Value.Identifier, e);
+            }
+        }
+    }
+'''
+          replace_once(custom_path, old_raise, new_raise)
+
+          # 2. Keep collection writer/reader element dispatch symmetric and reject unsupported polymorphism.
+          serialization_path = 'ConditionalConfigSync/Parts/CustomValueSerialization.cs'
+          replace_once(serialization_path, 'using System.Text;\n', 'using System.Text;\nusing System.Text.RegularExpressions;\n')
+          replace_once(
+              serialization_path,
+              'public partial class ConditionalConfigSync\n{\n',
+              '''public partial class ConditionalConfigSync
+{
+    private static readonly Regex assemblyVersionTypeIdentityPattern = new(
+        @",\\s*Version=[^,\\]\\[]+",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+''')
+          replace_once(
+              serialization_path,
+              '''        if (typeof(ISerializableParameter).IsAssignableFrom(effectiveType))
+        {
+            RequireConstructibleSerializableParameter(effectiveType);
+            GameReflection.SerializeParameter(value, ref package);
+            return;
+        }
+''',
+              '''        if (typeof(ISerializableParameter).IsAssignableFrom(effectiveType))
+        {
+            RequireConstructibleSerializableParameter(effectiveType);
+            RequireExactRuntimeType(effectiveType, value, "ISerializableParameter");
+            GameReflection.SerializeParameter(value, ref package);
+            return;
+        }
+''')
+          old_collection = '''    private static void WriteCollectionElements(ZPackage package, IEnumerable collection, Type? declaredElementType)
+    {
+        foreach (object? item in collection)
+        {
+            if (item == null)
+            {
+                // Protocol 1 has no per-element null marker. Adding one would corrupt existing
+                // list/array encodings. Nullable root values and reflected fields remain supported.
+                throw new NotSupportedException("Null collection elements have no encoding in the current protocol. Use ISerializableParameter for a nullable collection format.");
+            }
+            if (declaredElementType != null)
+            {
+                // The reader uses the declared element type, even though the legacy writer dispatches
+                // on the runtime object. Do not let a concrete item conceal an unconstructible interface.
+                RequireConstructibleSerializableParameter(declaredElementType);
+            }
+            WriteValueWithTypeToZPackage(package, item.GetType(), item);
+        }
+    }
+'''
+          new_collection = '''    private static void WriteCollectionElements(ZPackage package, IEnumerable collection, Type? declaredElementType)
+    {
+        foreach (object? item in collection)
+        {
+            if (item == null)
+            {
+                // Protocol 1 has no per-element null marker. Adding one would corrupt existing
+                // list/array encodings. Nullable root values and reflected fields remain supported.
+                throw new NotSupportedException("Null collection elements have no encoding in the current protocol. Use ISerializableParameter for a nullable collection format.");
+            }
+
+            if (declaredElementType == null)
+            {
+                WriteValueWithTypeToZPackage(package, item.GetType(), item);
+                continue;
+            }
+
+            Type effectiveElementType = Nullable.GetUnderlyingType(declaredElementType) ?? declaredElementType;
+            RequireExactRuntimeType(effectiveElementType, item, "collection element");
+            RequireConstructibleSerializableParameter(effectiveElementType);
+            // The receiver decodes with this same declared element type. Do not dispatch on a
+            // polymorphic runtime type and produce bytes the matching reader interprets differently.
+            WriteValueWithTypeToZPackage(package, effectiveElementType, item);
+        }
+    }
+
+    private static void RequireExactRuntimeType(Type declaredType, object value, string context)
+    {
+        Type effectiveType = Nullable.GetUnderlyingType(declaredType) ?? declaredType;
+        if (value.GetType() != effectiveType)
+        {
+            throw new NotSupportedException(
+                $"Polymorphic {context} '{value.GetType().FullName}' cannot be encoded as declared type '{effectiveType.FullName}' by the current protocol. " +
+                "Use an exact declared element/value type or implement an explicit ISerializableParameter container format.");
+        }
+    }
+
+    private static bool IsCompatibleZPackageTypeString(string receivedTypeName, Type expectedType)
+    {
+        string expectedTypeName = GetZPackageTypeString(expectedType);
+        return string.Equals(receivedTypeName, expectedTypeName, StringComparison.Ordinal)
+               || string.Equals(
+                   RemoveAssemblyVersionFromTypeIdentity(receivedTypeName),
+                   RemoveAssemblyVersionFromTypeIdentity(expectedTypeName),
+                   StringComparison.Ordinal);
+    }
+
+    private static string RemoveAssemblyVersionFromTypeIdentity(string typeName)
+        => assemblyVersionTypeIdentityPattern.Replace(typeName, string.Empty);
+'''
+          replace_once(serialization_path, old_collection, new_collection)
+          replace_once(
+              serialization_path,
+              '''                if (typeName != GetZPackageTypeString(field.FieldType))
+                {
+                    throw new InvalidDeserializationTypeException { received = typeName, expected = GetZPackageTypeString(field.FieldType), field = field.Name };
+                }
+''',
+              '''                if (!IsCompatibleZPackageTypeString(typeName, field.FieldType))
+                {
+                    throw new InvalidDeserializationTypeException { received = typeName, expected = GetZPackageTypeString(field.FieldType), field = field.Name };
+                }
+''')
+
+          # 3. Root custom values use the same stable read-side type-identity comparison.
+          replace_once(
+              'ConditionalConfigSync/Parts/Packages.cs',
+              '''                        string expectedType = GetZPackageTypeString(config.Type);
+                        if (typeName != expectedType)
+''',
+              '''                        string expectedType = GetZPackageTypeString(config.Type);
+                        if (!IsCompatibleZPackageTypeString(typeName, config.Type))
+''')
+
+          # 4. Carry forward the one useful build-integration target from broken PR #1.
+          project_path = 'ConditionalConfigSync.Plugin/ConditionalConfigSync.Plugin.csproj'
+          project_anchor = '''  <!-- Thunderstore.targets is an MSBuild import, not a regular project item.
+'''
+          project_target = '''  <Target Name="CopyConditionalConfigSyncPluginReference" AfterTargets="Build" Condition="'$(DesignTimeBuild)' != 'true'">
+    <MakeDir Directories="$(ManagersAssembliesPath)" />
+    <Copy SourceFiles="$(TargetPath)"
+          DestinationFolder="$(ManagersAssembliesPath)"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+'''
+          replace_once(project_path, project_anchor, project_target + project_anchor)
+
+          packaging_path = 'PACKAGING.md'
+          packaging_anchor = '''```text
+ConditionalConfigSync.Plugin.dll
+ConditionalConfigSync.dll
+```
+
+The shared `API` directory is outside this repository, one level above the repository root.
+'''
+          packaging_new = '''```text
+ConditionalConfigSync.Plugin.dll
+ConditionalConfigSync.dll
+```
+
+Normal project builds also refresh the shared manager/reference directory configured by `ManagersAssembliesPath` (default `D:\\work\\source\\repos\\Assemblies\\Managers`):
+
+```text
+ConditionalConfigSync.dll
+ConditionalConfigSync.xml
+ConditionalConfigSync.Plugin.dll
+```
+
+The core project owns copying `ConditionalConfigSync.dll` and its XML documentation. The plugin project separately copies `ConditionalConfigSync.Plugin.dll` through `CopyConditionalConfigSyncPluginReference`; keep both build targets when changing project or packaging integration.
+
+The shared `API` directory is outside this repository, one level above the repository root.
+'''
+          replace_once(packaging_path, packaging_anchor, packaging_new)
+
+          report = '''# PR #4: third Codex follow-up and PR #1 target transfer
+
+## Scope
+
+This pass addresses the three new Codex findings reported against `9c059ce09ecac248ebd1d6fe9970127a9dab0ea1` and carries forward the one independently verified build-integration target that remained useful in broken PR #1. The working branch remains `fix/full-repository-review-20260908` and the baseline before this pass is `edf461868f4d2b617e554782db5850e8672cec28` (the same source tree as `9c059ce` plus the completed branch-cleanup history).
+
+The operating assumptions are unchanged: intended compatible mod clients, ordinary lifecycle and callbacks, no attacker/modified/malformed-client analysis. Package version 1.0.5, core AssemblyVersion 1.0.0.0 and wire protocol 1 remain unchanged. No changelog or public README is changed.
+
+## 1. Polymorphic collection elements
+
+Codex finding: `CustomSyncedValue<List<object>>` could serialize a runtime `string` while the receiver decoded the same bytes as declared `object`.
+
+Correction: collection element serialization now uses the declared element encoding and rejects a non-null runtime element whose effective runtime type differs from the declared element type. Nullable value-type boxing is handled through the nullable underlying type. ISerializableParameter elements still require a receiver-constructible exact declared type. This is a validation correction only; no new marker or successful wire layout is introduced.
+
+The same exact-runtime-type rule is applied to root ISerializableParameter values because Valheim's writer dispatches on the runtime object while the reader constructs the declared type.
+
+## 2. Custom-value normalization before publication
+
+Codex finding: the CCS ValueChanged subscriber was installed before consumer subscribers, so a server could publish a pre-normalized custom value before a later consumer callback clamped or otherwise canonicalized it.
+
+Correction: CustomSyncedValueBase now treats publication as the final phase of a nested notification cascade. The CCS publisher remains the first registered delegate for compatibility, but RaiseValueChanged separates it from consumer callbacks and executes deferred publishers only after the outermost synchronous notification returns. Consumer exceptions remain isolated.
+
+Pending latest-state publications coalesce at the value's last occurrence in the cascade. Sequenced notifications keep every publication occurrence in invocation order. Publishers read the settled active value, so a normalization callback cannot expose the earlier candidate. A nested change to another sequenced value is also ordered after the outer publication record rather than overtaking it.
+
+## 3. Compatible type identities across consumer assembly versions
+
+Codex finding: AssemblyQualifiedName contains assembly Version metadata, while CCS version admission explicitly allows compatible consumer releases whose CurrentVersion/MinimumRequiredVersion ranges overlap.
+
+Correction: the existing AssemblyQualifiedName bytes remain on the wire. Read-side root and reflected-field checks first accept exact identity and then compare the same identity with only `Version=...` assembly tokens removed, including nested generic argument identities. Type name, assembly simple name, culture and public-key-token metadata remain part of the comparison. This therefore permits compatible assembly-version changes without changing protocol 1 or weakening unrelated type identity checks.
+
+## 4. Plugin reference copy target from PR #1
+
+PR #1 was rechecked only as a secondary source. Its runtime branch is not authoritative and was not merged or cherry-picked. The useful remaining item was `CopyConditionalConfigSyncPluginReference`: the core project already copies `ConditionalConfigSync.dll` and XML documentation to `ManagersAssembliesPath`, but the plugin project did not refresh `ConditionalConfigSync.Plugin.dll` there.
+
+That target is now implemented directly in the current branch with a design-time-build guard, and PACKAGING.md documents the three manager/reference artifacts. No other PR #1 code is imported.
+
+## Static verification performed
+
+- Exact text replacements are assertion-guarded; the workflow aborts if the reviewed source shape differs.
+- `git diff --check` is executed before commit.
+- The changed-file list is checked to ensure no CHANGELOG file is touched.
+- Plugin version 1.0.5 and protocol 1 are asserted from source.
+- Edited repository text is scanned for accidental Cyrillic.
+- No build, compilation, dependency restore, game/mod execution, fake harness or runtime test is performed.
+
+## Maintainer validation scenarios (not executed here)
+
+1. Assign a server-owned custom value whose ValueChanged handler clamps a candidate. Verify consumers and remote peers observe only the settled canonical value; repeat with nested changes to another sequenced custom value and with repeated equal sequenced notifications.
+2. Round-trip exact-type primitive/enum/struct/collection/ISerializableParameter values. Confirm polymorphic `List<object>`-style values are rejected during outgoing preparation rather than producing a package the reader skips.
+3. Run compatible consumer mod versions with different assembly Version metadata but unchanged synchronized type names/layouts. Confirm root custom values and reflected struct fields deserialize; confirm different type/assembly/token identities remain rejected.
+4. Build the plugin in the maintainer environment and verify ManagersAssembliesPath receives current `ConditionalConfigSync.dll`, `ConditionalConfigSync.xml` and `ConditionalConfigSync.Plugin.dll` while design-time project loading does not perform the copy.
+'''
+          Path('docs/reviews/2026-09-09-codex-follow-up-3.md').write_text(report, encoding='utf-8', newline='\n')
+
+          # Static repository checks only; do not build or run the mod.
+          plugin_info = Path('ConditionalConfigSync/PluginInfoCCS.cs').read_text(encoding='utf-8')
+          if 'public const string PluginVersion = "1.0.5";' not in plugin_info:
+              raise RuntimeError('Plugin version changed unexpectedly.')
+          if 'public const int ProtocolVersion = 1;' not in plugin_info:
+              raise RuntimeError('Protocol version changed unexpectedly.')
+
+          edited = [
+              custom_path,
+              serialization_path,
+              'ConditionalConfigSync/Parts/Packages.cs',
+              project_path,
+              packaging_path,
+              'docs/reviews/2026-09-09-codex-follow-up-3.md',
+          ]
+          cyrillic = re.compile(r'[А-Яа-яЁё]')
+          for path in edited:
+              if cyrillic.search(Path(path).read_text(encoding='utf-8')):
+                  raise RuntimeError(f'Unexpected Cyrillic in {path}.')
+          PY
+
+          git diff --check
+          if git diff --name-only | grep -E '(^|/)CHANGELOG\.md$'; then
+            echo 'Unexpected changelog modification.' >&2
+            exit 1
+          fi
+
+      - name: Commit final tree and remove one-time workflow
+        shell: bash
+        run: |
+          git config user.name "Suden"
+          git config user.email "20457922+shudnal@users.noreply.github.com"
+          git rm .github/workflows/apply-codex-followup-3-20260909.yml
+          git add ConditionalConfigSync/CustomSyncedValue.cs \
+                  ConditionalConfigSync/Parts/CustomValueSerialization.cs \
+                  ConditionalConfigSync/Parts/Packages.cs \
+                  ConditionalConfigSync.Plugin/ConditionalConfigSync.Plugin.csproj \
+                  PACKAGING.md \
+                  docs/reviews/2026-09-09-codex-follow-up-3.md
+          git diff --cached --check
+          if git diff --cached --name-only | grep -E '(^|/)CHANGELOG\.md$'; then
+            echo 'Unexpected changelog modification.' >&2
+            exit 1
+          fi
+          git commit -m "Fix third Codex findings and restore plugin reference copy"
+          git push origin HEAD:fix/full-repository-review-20260908
