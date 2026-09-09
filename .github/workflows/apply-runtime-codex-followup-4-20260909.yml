@@ -1,0 +1,52 @@
+name: Apply runtime and fourth Codex follow-up
+
+on:
+  push:
+    branches:
+      - fix/full-repository-review-20260908
+    paths:
+      - .github/workflows/apply-runtime-codex-followup-4-20260909.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.repository == 'shudnal/ConditionalConfigSync' && github.ref == 'refs/heads/fix/full-repository-review-20260908'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply source corrections
+        shell: bash
+        run: python3 .github/scripts/apply-runtime-codex-followup-4.py
+
+      - name: Static source checks
+        shell: bash
+        run: |
+          git diff --check
+          test "$(grep -c 'public const string PluginVersion = "1.0.5";' ConditionalConfigSync/PluginInfoCCS.cs)" -eq 1
+          test "$(grep -c 'public const int ProtocolVersion = 1;' ConditionalConfigSync/PluginInfoCCS.cs)" -eq 1
+          if ! git diff --quiet -- CHANGELOG.md ConditionalConfigSync.Plugin/package/thunderstore/CHANGELOG.md ConditionalConfigSync.Plugin/package/github/CHANGELOG.md; then
+            echo 'CHANGELOG content changed unexpectedly.' >&2
+            exit 1
+          fi
+          if grep -RInP '[\x{0400}-\x{04FF}]' ConditionalConfigSync/CustomSyncedValue.cs ConditionalConfigSync/ConditionalConfigSync.cs ConditionalConfigSync/Parts/Transport.cs ConditionalConfigSync/Parts/CustomValueSerialization.cs ConditionalConfigSync/Parts/Packages.cs docs/reviews/2026-09-09-runtime-codex-follow-up-4.md; then
+            echo 'Unexpected Cyrillic in edited repository content.' >&2
+            exit 1
+          fi
+
+      - name: Commit final tree and remove temporary delivery files
+        shell: bash
+        run: |
+          rm -f .github/scripts/apply-runtime-codex-followup-4.py
+          rm -f .github/workflows/apply-runtime-codex-followup-4-20260909.yml
+          git config user.name 'Suden'
+          git config user.email '20457922+shudnal@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'Fix local-world sends and fourth Codex findings'
+          git push origin HEAD:fix/full-repository-review-20260908
