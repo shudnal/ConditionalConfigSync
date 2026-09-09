@@ -44,6 +44,16 @@ ConditionalConfigSync.Plugin.dll
 ConditionalConfigSync.dll
 ```
 
+Normal project builds also refresh the shared manager/reference directory configured by `ManagersAssembliesPath` (default `D:\work\source\repos\Assemblies\Managers`):
+
+```text
+ConditionalConfigSync.dll
+ConditionalConfigSync.xml
+ConditionalConfigSync.Plugin.dll
+```
+
+The core project owns copying `ConditionalConfigSync.dll` and its XML documentation. The plugin project separately copies `ConditionalConfigSync.Plugin.dll` through `CopyConditionalConfigSyncPluginReference`; keep both build targets when changing project or packaging integration.
+
 The shared `API` directory is outside this repository, one level above the repository root.
 
 ## GitHub release files

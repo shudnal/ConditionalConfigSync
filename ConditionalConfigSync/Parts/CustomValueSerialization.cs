@@ -7,12 +7,16 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.Serialization;
 using System.Text;
+using System.Text.RegularExpressions;
 using HarmonyLib;
 
 namespace ConditionalConfigSync;
 
 public partial class ConditionalConfigSync
 {
+    private static readonly Regex assemblyVersionTypeIdentityPattern = new(
+        @",\s*Version=[^,\]\[]+",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
     // ConfigEntry values use TOML strings. Custom values retain the existing count/element and
     // reflected-field formats, or use Valheim's ISerializableParameter hook for domain formats.
     private static void WriteValueWithTypeToZPackage(ZPackage package, Type type, object value)
@@ -21,6 +25,7 @@ public partial class ConditionalConfigSync
         if (typeof(ISerializableParameter).IsAssignableFrom(effectiveType))
         {
             RequireConstructibleSerializableParameter(effectiveType);
+            RequireExactRuntimeType(effectiveType, value, "ISerializableParameter");
             GameReflection.SerializeParameter(value, ref package);
             return;
         }
@@ -111,15 +116,45 @@ public partial class ConditionalConfigSync
                 // list/array encodings. Nullable root values and reflected fields remain supported.
                 throw new NotSupportedException("Null collection elements have no encoding in the current protocol. Use ISerializableParameter for a nullable collection format.");
             }
-            if (declaredElementType != null)
+
+            if (declaredElementType == null)
             {
-                // The reader uses the declared element type, even though the legacy writer dispatches
-                // on the runtime object. Do not let a concrete item conceal an unconstructible interface.
-                RequireConstructibleSerializableParameter(declaredElementType);
+                WriteValueWithTypeToZPackage(package, item.GetType(), item);
+                continue;
             }
-            WriteValueWithTypeToZPackage(package, item.GetType(), item);
+
+            Type effectiveElementType = Nullable.GetUnderlyingType(declaredElementType) ?? declaredElementType;
+            RequireExactRuntimeType(effectiveElementType, item, "collection element");
+            RequireConstructibleSerializableParameter(effectiveElementType);
+            // The receiver decodes with this same declared element type. Do not dispatch on a
+            // polymorphic runtime type and produce bytes the matching reader interprets differently.
+            WriteValueWithTypeToZPackage(package, effectiveElementType, item);
         }
     }
+
+    private static void RequireExactRuntimeType(Type declaredType, object value, string context)
+    {
+        Type effectiveType = Nullable.GetUnderlyingType(declaredType) ?? declaredType;
+        if (value.GetType() != effectiveType)
+        {
+            throw new NotSupportedException(
+                $"Polymorphic {context} '{value.GetType().FullName}' cannot be encoded as declared type '{effectiveType.FullName}' by the current protocol. " +
+                "Use an exact declared element/value type or implement an explicit ISerializableParameter container format.");
+        }
+    }
+
+    private static bool IsCompatibleZPackageTypeString(string receivedTypeName, Type expectedType)
+    {
+        string expectedTypeName = GetZPackageTypeString(expectedType);
+        return string.Equals(receivedTypeName, expectedTypeName, StringComparison.Ordinal)
+               || string.Equals(
+                   RemoveAssemblyVersionFromTypeIdentity(receivedTypeName),
+                   RemoveAssemblyVersionFromTypeIdentity(expectedTypeName),
+                   StringComparison.Ordinal);
+    }
+
+    private static string RemoveAssemblyVersionFromTypeIdentity(string typeName)
+        => assemblyVersionTypeIdentityPattern.Replace(typeName, string.Empty);
 
     private static void RequireConstructibleSerializableParameter(Type type)
     {
@@ -274,7 +309,7 @@ public partial class ConditionalConfigSync
             foreach (FieldInfo field in fields)
             {
                 string typeName = GameReflection.PackageReadString(package);
-                if (typeName != GetZPackageTypeString(field.FieldType))
+                if (!IsCompatibleZPackageTypeString(typeName, field.FieldType))
                 {
                     throw new InvalidDeserializationTypeException { received = typeName, expected = GetZPackageTypeString(field.FieldType), field = field.Name };
                 }

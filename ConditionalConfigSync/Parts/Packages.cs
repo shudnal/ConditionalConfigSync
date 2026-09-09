@@ -477,7 +477,7 @@ public partial class ConditionalConfigSync
                         }
 
                         string expectedType = GetZPackageTypeString(config.Type);
-                        if (typeName != expectedType)
+                        if (!IsCompatibleZPackageTypeString(typeName, config.Type))
                         {
                             if (strictClientUpdate)
                             {

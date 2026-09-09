@@ -14,6 +14,24 @@ namespace ConditionalConfigSync;
 [Description("Base class for runtime values synchronized independently from BepInEx config files.")]
 public abstract class CustomSyncedValueBase
 {
+    private sealed class PendingPublication
+    {
+        internal readonly CustomSyncedValueBase Value;
+        internal readonly Action Publisher;
+
+        internal PendingPublication(CustomSyncedValueBase value, Action publisher)
+        {
+            Value = value;
+            Publisher = publisher;
+        }
+    }
+
+    [ThreadStatic]
+    private static int notificationDepth;
+
+    [ThreadStatic]
+    private static List<PendingPublication>? pendingPublications;
+
     private readonly ConditionalConfigSync owner;
 
     /// <summary>
@@ -57,15 +75,78 @@ public abstract class CustomSyncedValueBase
             return;
         }
 
-        foreach (Action handler in handlers.GetInvocationList())
+        Delegate[] invocationList = handlers.GetInvocationList();
+        if (invocationList.Length == 0)
         {
+            return;
+        }
+
+        // AddCustomValue installs the CCS publisher before a derived constructor can attach consumer handlers.
+        // Keep that internal callback out of the consumer phase so normalization/reentrant callbacks can settle
+        // the active value first. Publication is flushed after the outermost nested notification returns.
+        Action publisher = (Action)invocationList[0];
+        (pendingPublications ??= new List<PendingPublication>()).Add(new PendingPublication(this, publisher));
+        ++notificationDepth;
+        try
+        {
+            for (int index = 1; index < invocationList.Length; ++index)
+            {
+                try
+                {
+                    ((Action)invocationList[index])();
+                }
+                catch (Exception e)
+                {
+                    owner.ReportCustomValueSubscriberFailure(Identifier, e);
+                }
+            }
+        }
+        finally
+        {
+            --notificationDepth;
+            if (notificationDepth == 0)
+            {
+                FlushPendingPublications();
+            }
+        }
+    }
+
+    private static void FlushPendingPublications()
+    {
+        List<PendingPublication>? publications = pendingPublications;
+        pendingPublications = null;
+        if (publications == null || publications.Count == 0)
+        {
+            return;
+        }
+
+        // Latest-state values publish at their last occurrence in the notification cascade. Sequenced
+        // values retain every notification in invocation order. Publishers read the now-canonical active
+        // value, so normalization callbacks cannot expose a pre-normalized intermediate payload.
+        Dictionary<CustomSyncedValueBase, int> lastStatePublication = new();
+        for (int index = 0; index < publications.Count; ++index)
+        {
+            if (!publications[index].Value.PreserveUpdateSequence)
+            {
+                lastStatePublication[publications[index].Value] = index;
+            }
+        }
+
+        for (int index = 0; index < publications.Count; ++index)
+        {
+            PendingPublication publication = publications[index];
+            if (!publication.Value.PreserveUpdateSequence && lastStatePublication[publication.Value] != index)
+            {
+                continue;
+            }
+
             try
             {
-                handler();
+                publication.Publisher();
             }
             catch (Exception e)
             {
-                owner.ReportCustomValueSubscriberFailure(Identifier, e);
+                publication.Value.owner.ReportCustomValueSubscriberFailure(publication.Value.Identifier, e);
             }
         }
     }
