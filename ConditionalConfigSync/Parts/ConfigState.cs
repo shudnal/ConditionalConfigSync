@@ -366,7 +366,14 @@ public partial class ConditionalConfigSync
     {
         internal static bool Prefix(ConfigEntryBase __instance, string value)
         {
-            if (GetConfigData(__instance) is not { } data || IsWritableConfig(data))
+            if (GetConfigData(__instance) is not { } data)
+            {
+                return true;
+            }
+
+            // ConfigFile.Reload reads the replica's persisted local fallback. Edit permission for an
+            // administrator or unlocked client does not turn that file value into canonical server state.
+            if (!ShouldStoreLocalConfigValue(data) && IsWritableConfig(data))
             {
                 return true;
             }

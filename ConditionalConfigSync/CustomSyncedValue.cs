@@ -4,6 +4,23 @@ using System.ComponentModel;
 
 namespace ConditionalConfigSync;
 
+public partial class ConditionalConfigSync
+{
+    internal bool CanAcceptActiveCustomValueChange(CustomSyncedValueBase customValue)
+    {
+        if (customValuesBeingApplied.Contains(customValue) || IsSourceOfTruth || CanBroadcastFromThisSide())
+        {
+            return true;
+        }
+
+        string reason = !InitialSyncDone
+            ? "initial server synchronization is not complete"
+            : "the local side is not authorized to publish active custom values";
+        DebugWarning("CustomValue", $"Rejected local change to protected custom value {customValue.Identifier}: {reason}");
+        return false;
+    }
+}
+
 /// <summary>
 /// Non-generic base for runtime values synchronized independently from BepInEx config files.
 /// </summary>
@@ -72,7 +89,7 @@ public abstract class CustomSyncedValueBase
 
     private void RaiseValueChanged()
     {
-        if (!hasBoxedValue)
+        if (!hasBoxedValue || !owner.CanAcceptActiveCustomValueChange(this))
         {
             return;
         }
@@ -227,6 +244,10 @@ public abstract class CustomSyncedValueBase
             return false;
         }
         if (BoxedValuesEqual(boxedValue, value) && !notifyIfEqual)
+        {
+            return false;
+        }
+        if (!owner.CanAcceptActiveCustomValueChange(this))
         {
             return false;
         }
