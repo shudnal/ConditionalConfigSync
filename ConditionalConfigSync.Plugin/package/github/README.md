@@ -2,7 +2,7 @@
 
 Conditional Config Sync is a shared infrastructure library for Valheim mods. It does not add gameplay content, items, UI, or configuration options of its own. Install it when another mod lists it as a dependency.
 
-The package provides centralized config synchronization, version checks, server-side policy overrides, protected locking, and synchronized runtime values. Keeping this logic in one standalone dependency means fixes can be shipped by updating this package instead of rebuilding every mod that uses it.
+The package provides centralized config synchronization, version checks, server-side ownership and admission policy overrides, protected locking, and synchronized runtime values. Keeping this logic in one standalone dependency means fixes can be shipped by updating this package instead of rebuilding every mod that uses it.
 
 It is an independent synchronization option for mod authors who need per-setting ownership policy, hidden-setting controls, and expanded runtime-value behavior. Jotunn and ServerSync remain separate libraries with their own use cases and development paths.
 
@@ -52,9 +52,10 @@ Every registered setting has one of three ownership modes selected by its mod au
 - `Conditional` - uses the mod-defined server/client default and may be overridden by server policy. It is appropriate when an administrator may reasonably choose between one shared server value and per-client behavior;
 - `AlwaysClientControlled` - always local to each client and cannot be forced by sync policy. It is intended for presentation, local UI, controls, and other behavior that does not participate in shared mechanics.
 
-A mod may also register one locking setting that controls whether ordinary clients may publish changes to server-controlled settings. Hidden-state policy is independent and may hide settings from compatible configuration managers in any ownership mode.
+A mod may also register one locking setting that controls whether ordinary clients may publish changes to server-controlled settings. Hidden-state policy is independent and may hide settings from compatible configuration managers in any ownership mode. A mod author may additionally opt its remote-installation requirement into `ModRequirementMode.Conditional`, allowing the server to require or permit clients without that specific mod while retaining the author's declared default.
 
 Policy files are created in `BepInEx/config/shudnal.ConditionalConfigSync` on the server. Existing files are read synchronously during server startup before the file watchers are used. Reads are retried until the file metadata is stable, so common editor save patterns such as truncate/write/rename do not replace a working policy with a partial snapshot. The files are then watched for changes and can be edited while the server is running.
+
 ### Locking behavior
 
 Conditional Config Sync provides a locking model familiar to ServerSync users and adds explicit protection for the locking setting itself.
@@ -124,6 +125,39 @@ Typical uses:
 - override one setting differently from the rest of its section;
 - temporarily test a different ownership model without rebuilding the mod.
 
+### Mod requirement policy
+
+File:
+
+```text
+BepInEx/config/shudnal.ConditionalConfigSync/ConditionalConfigSync.ModRequirements.cfg
+```
+
+This policy controls connection admission for mods whose authors explicitly use `ModRequirementMode.Conditional`. It is separate from config ownership and is not a general client mod-list allow/deny mechanism.
+
+Use `+` to require the mod on connecting clients and `-` to allow clients without it:
+
+```ini
+# Require this mod even if the author default is optional
++ author.mod
+
+# Permit clients without this mod even if the author default is required
+- another.author.mod
+```
+
+Rules:
+
+- no matching rule preserves the mod author's `ModRequired` default;
+- `+ ModGuid` forces the consumer to be required for new incoming client connections;
+- `- ModGuid` permits new incoming clients that do not provide that consumer;
+- rules are ignored for `ModRequirementMode.Fixed`, which is the backward-compatible default;
+- the policy is server-side only and does not weaken a modded client's own requirement that the server provide the mod;
+- a missing consumer is allowed when the effective server requirement is optional, but an advertised Conditional consumer must still pass its normal version and CCS protocol compatibility checks;
+- Conditional clients advertise their consumer handshake even when the author default is optional, so a server can reliably force that consumer to be required;
+- requirement policy is snapshotted when a connection attempt begins. Reloading the file affects later connection attempts and never disconnects already connected peers.
+
+This supports deliberate degraded-operation scenarios such as crossplay servers: an author can recommend and default to `ModRequired = true`, while explicitly allowing a server administrator to accept clients that cannot install the mod.
+
 ### Hidden settings
 
 File:
@@ -176,10 +210,10 @@ conditionalconfigsync_policy_validate
 conditionalconfigsync_policy_dump
 ```
 
-- `status` shows registered mods, mode counts, effective server-controlled settings, hidden settings, and policy-file paths;
-- `policy_reload` reads and applies both policy files immediately on the Unity main thread;
+- `status` shows registered mods, config mode counts, effective config ownership, hidden settings, effective mod requirements, and policy-file paths;
+- `policy_reload` reads and applies all policy files immediately on the Unity main thread;
 - `policy_validate` reports syntax errors, duplicates, conflicts, unknown identifiers, and rules ignored by fixed modes;
-- `policy_dump` writes `ConditionalConfigSync.PolicyDump.txt` with copy-ready exact and section identifiers. Each setting is followed only by its policy mode and default ownership; the variable type is intentionally omitted.
+- `policy_dump` writes `ConditionalConfigSync.PolicyDump.txt` with copy-ready mod, exact-setting, and section identifiers plus their author-defined modes/defaults.
 
 Debug logging supports `Basic`, `Verbose`, and `Trace` levels and an optional mod-name filter. Normal startup stays quiet; warnings and errors remain visible without debug logging.
 
@@ -240,43 +274,55 @@ internal static readonly ConfigSync configSync = new ConfigSync(pluginID)
 {
     DisplayName = pluginName,
     CurrentVersion = pluginVersion,
-    MinimumRequiredVersion = pluginVersion,
+    MinimumRequiredVersion = minimumCompatibleVersion,
     ModRequired = true
 };
 ```
 
 ### Requiring the mod on the remote side
 
-`ModRequired` controls whether the **owning mod** must also be installed and compatible on the remote peer. This is separate from the BepInEx hard dependency on Conditional Config Sync itself:
+`ModRequired` is the mod author's default compatibility contract for whether the **owning mod** must also be installed on the remote peer. This is separate from the BepInEx hard dependency on Conditional Config Sync itself:
 
 - the hard dependency requires CCS on the same machine where the owning mod is installed;
-- `ModRequired = true` requires a compatible copy of the owning mod on the other side of the connection.
+- `ModRequired = true` means a client running the mod requires the server to provide a compatible copy, and a server requires connecting clients to provide one;
+- `ModRequired = false` allows the remote side to omit the owning mod.
 
-Set it before a connection is established, preferably in the `ConfigSync` object initializer:
+The default `ModRequirementMode.Fixed` preserves this behavior exactly and cannot be overridden by server policy:
 
 ```csharp
 internal static readonly ConfigSync configSync = new ConfigSync(pluginID)
 {
     DisplayName = pluginName,
     CurrentVersion = pluginVersion,
-    MinimumRequiredVersion = pluginVersion,
+    MinimumRequiredVersion = minimumCompatibleVersion,
     ModRequired = true
 };
 ```
 
-The behavior is symmetric:
+Use `ModRequirementMode.Conditional` only when the author explicitly accepts that a server administrator may strengthen or relax the requirement for **incoming clients**:
 
-| Local side running the mod | `ModRequired` | Remote side without the mod | Result |
-|---|---:|---|---|
-| Client | `true` | Server | Connection is rejected on the client |
-| Server | `true` | Client | The server rejects that client |
-| Client or server | `false` | Remote peer | Connection is allowed and this mod instance is not synchronized with the missing remote copy |
+```csharp
+internal static readonly ConfigSync configSync = new ConfigSync(pluginID)
+{
+    DisplayName = pluginName,
+    CurrentVersion = pluginVersion,
+    MinimumRequiredVersion = minimumCompatibleVersion,
+    ModRequired = true,
+    ModRequirementMode = ModRequirementMode.Conditional
+};
+```
 
-Use `true` for server-authoritative, world-state, gameplay, or other two-sided mods. A mod such as Seasons, which synchronizes the current season, day, settings, and runtime state, must require its remote copy. Leave the default `false` only for a genuinely client-only mod or an optional integration that remains correct when the other side does not have it.
+In this example, the author's recommendation remains `Required`. A server running the mod may place `- pluginID` in `ConditionalConfigSync.ModRequirements.cfg` to accept unmodded or console clients. This server-side override is intentionally asymmetric: a client running the mod still uses the author's `ModRequired = true` default and refuses to join a server where the mod itself is absent.
+
+A Conditional consumer with `ModRequired = false` also advertises its version handshake from the client. That allows a server policy to use `+ pluginID` and require the mod even though the author's default is optional. Fixed optional consumers retain the original one-sided handshake behavior.
+
+When a Conditional consumer is optional for a particular incoming connection, complete absence is accepted. If the client does advertise that consumer, its normal mod-version and CCS protocol compatibility checks still apply. Relaxing a required-by-default consumer to optional therefore does not relax its compatibility range for clients that still have the mod. Conversely, if an optional-by-default consumer is forced to required and no explicit `MinimumRequiredVersion` was supplied, the server uses the existing required-consumer fallback of `CurrentVersion` for that admission. The server snapshots the effective requirement when the connection begins, so a live policy reload changes later connection attempts only and does not disconnect existing players.
 
 When a client-side optional instance receives no matching server handshake and the connection completes successfully, CCS returns that instance to local source-of-truth ownership. Its local values remain editable and are not published to the server. This is not an initial server synchronization, so `InitialSyncDone` remains false and `InitialSyncCompleted` is not raised.
 
-When the remote copy exists, `CurrentVersion`, `MinimumRequiredVersion`, and the CCS wire protocol are used for compatibility checks. Late registration or `RequestFullSync()` does not repeat connection admission, so configure `ModRequired` while creating the `ConfigSync` instance.
+`MinimumRequiredVersion` is the oldest compatible owning-mod version, not automatically the current release. If compatible releases span several versions, keep this value at the oldest supported version instead of advancing it with every package release.
+
+When the remote copy exists, `CurrentVersion`, `MinimumRequiredVersion`, and the CCS wire protocol are used for compatibility checks. Late registration or `RequestFullSync()` does not repeat connection admission, so configure both `ModRequired` and `ModRequirementMode` while creating the `ConfigSync` instance.
 
 Register an existing BepInEx entry with its mode in one call:
 
@@ -360,6 +406,9 @@ A policy rule that matches the mod default is intentionally reported as `ConfigS
 Conditional Config Sync uses a numeric wire protocol version that is independent from the DLL and package version.
 
 The first public release uses protocol `1`. Clients and servers must use the same protocol version. The protocol number is increased only when an incompatible network-format change is introduced; ordinary library updates do not require a protocol bump while the wire contract remains compatible.
+
+Conditional mod requirements reuse the existing version-handshake packet and do not add a new wire field. Existing consumers compiled against CCS 1.0.5 remain `ModRequirementMode.Fixed` by default and can run against the newer core DLL without being rebuilt. Only consumers that use the new `ModRequirementMode.Conditional` API need to declare the newer CCS package as their minimum dependency.
+
 Policy-control support is advertised through an optional trailing capability field in the existing lock-exemption entry. Older clients ignore the extra payload, while newer clients keep interactive policy controls disabled when connected to a server that does not advertise the feature.
 
 ### Late registration and resynchronization
@@ -414,6 +463,7 @@ For Thunderstore, add this package to the mod's dependencies. Do not copy either
 - Supports runtime switching between server-controlled and client-controlled state.
 - Adds three explicit config modes: `AlwaysServerControlled`, `Conditional`, and `AlwaysClientControlled`.
 - Adds server-side `SyncPolicy.cfg` overrides for exact settings and complete sections.
+- Adds opt-in `ModRequirementMode.Conditional` admission policy through `ModRequirements.cfg`, preserving fixed `ModRequired` behavior for existing consumers.
 - Allows compatible configuration UIs to request administrator-authorized exact-setting policy toggles while keeping the policy file as the persistent source of truth.
 - Adds exact-setting and section-level `HiddenConfigs.cfg` rules for Configuration Manager visibility.
 - Sends effective config state together with server values.

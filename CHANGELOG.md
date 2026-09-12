@@ -1,3 +1,11 @@
+# 1.0.6
+* added `ModRequirementMode.Fixed` and `ModRequirementMode.Conditional`; existing consumers remain fixed by default and keep their previous `ModRequired` behavior without recompilation
+* added server-only `ConditionalConfigSync.ModRequirements.cfg` admission policy, where `+ ModGuid` requires a Conditional consumer and `- ModGuid` allows clients without it while preserving the mod author's default when no rule matches
+* Conditional consumers now advertise their existing version handshake from clients even when author-default optional, allowing the server to require them reliably without changing protocol 1
+* snapshots the effective Conditional requirement per connection so live policy reloads affect only new connection attempts and never disconnect existing peers
+* keeps normal compatibility checks for advertised Conditional consumers even when the server allows the consumer to be absent
+* extended policy status, reload, validation, dump, watcher lifecycle, diagnostics, README, and project context for mod-requirement policy
+
 # 1.0.5
 * cached full server synchronization snapshots per authoritative state revision and administrator class, reusing already serialized and compressed wire data for later initial syncs, complete resyncs, and full authoritative corrections until synchronized state changes
 * added Verbose serialization and compression diagnostics with raw/wire sizes, compression ratio, time spent serializing/compressing, and full-snapshot build/reuse reporting

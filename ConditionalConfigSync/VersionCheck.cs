@@ -134,8 +134,13 @@ public partial class VersionCheck
     [Description("Oldest compatible version accepted from the remote peer.")]
     public string MinimumRequiredVersion
     {
-        get => minimumRequiredVersion ?? (ModRequired ? CurrentVersion : "0.0.0");
+        get => GetMinimumRequiredVersion(ModRequired);
         set => minimumRequiredVersion = value;
+    }
+
+    private string GetMinimumRequiredVersion(bool required)
+    {
+        return minimumRequiredVersion ?? (required ? CurrentVersion : "0.0.0");
     }
 
     /// <summary>
@@ -163,9 +168,10 @@ public partial class VersionCheck
     [Description("Whether the connected server's ConditionalConfigSync protocol is known.")]
     public static bool RemoteServerProtocolKnown { get; private set; }
 
-    // Tracks which clients have passed the version check and preserves per-peer diagnostics on servers.
+    // Tracks which clients have passed the version check and preserves per-peer admission state and diagnostics.
     private readonly HashSet<ZRpc> ValidatedClients = new();
     private readonly Dictionary<ZRpc, VersionHandshakeState> receivedClientHandshakes = new();
+    private readonly Dictionary<ZRpc, bool> requiredClients = new();
 
     // Optional backing field to use ConditionalConfigSync values (will override other fields).
     private readonly ConditionalConfigSync? configSync;
@@ -252,6 +258,38 @@ public partial class VersionCheck
     {
         receivedClientHandshakes.Remove(rpc);
         ValidatedClients.Remove(rpc);
+        requiredClients.Remove(rpc);
+    }
+
+    private void SnapshotRequirementForPeer(ZRpc rpc)
+    {
+        requiredClients[rpc] = configSync?.ComputeEffectiveModRequired() ?? ModRequired;
+    }
+
+    private bool IsRequiredForPeer(ZRpc rpc)
+    {
+        return requiredClients.TryGetValue(rpc, out bool required)
+            ? required
+            : configSync?.ComputeEffectiveModRequired() ?? ModRequired;
+    }
+
+    private string GetMinimumRequiredVersionForPeer(ZRpc rpc)
+    {
+        // Relaxing presence must not also relax the author's compatibility range for peers that do advertise the mod.
+        // Strengthening an author-default optional consumer to required gets the same CurrentVersion fallback as a
+        // fixed required consumer when no explicit MinimumRequiredVersion was supplied.
+        return GetMinimumRequiredVersion(ModRequired || IsRequiredForPeer(rpc));
+    }
+
+    private bool ShouldSendClientHandshake()
+    {
+        return ModRequired || configSync?.ModRequirementMode == ModRequirementMode.Conditional;
+    }
+
+    private bool ShouldValidateAdvertisedClient(ZRpc rpc)
+    {
+        return configSync?.ModRequirementMode == ModRequirementMode.Conditional
+               && receivedClientHandshakes.ContainsKey(rpc);
     }
 
     private static VersionFailureKind GetFailure(
@@ -309,9 +347,9 @@ public partial class VersionCheck
         return GetFailure(receivedServerHandshake, CurrentVersion, MinimumRequiredVersion) == VersionFailureKind.None;
     }
 
-    private bool IsVersionOk(VersionHandshakeState state)
+    private bool IsVersionOk(VersionHandshakeState state, ZRpc rpc)
     {
-        return GetFailure(state, CurrentVersion, MinimumRequiredVersion) == VersionFailureKind.None;
+        return GetFailure(state, CurrentVersion, GetMinimumRequiredVersionForPeer(rpc)) == VersionFailureKind.None;
     }
 
     private void ResolveMissingOptionalServer()
@@ -356,7 +394,8 @@ public partial class VersionCheck
     private string ErrorServer(ZRpc rpc)
     {
         receivedClientHandshakes.TryGetValue(rpc, out VersionHandshakeState? state);
-        VersionFailureKind failure = GetFailure(state, CurrentVersion, MinimumRequiredVersion);
+        string localMinimumRequiredVersion = GetMinimumRequiredVersionForPeer(rpc);
+        VersionFailureKind failure = GetFailure(state, CurrentVersion, localMinimumRequiredVersion);
         string client = FormatRemotePeer(rpc, "client");
         string elapsed = GetHandshakeElapsed(rpc);
         string malformed = malformedHandshakeErrors.TryGetValue(rpc, out string? malformedError)
@@ -367,7 +406,7 @@ public partial class VersionCheck
         {
             case VersionFailureKind.HandshakeMissing:
                 return $"Disconnect: The {client} did not send a matching version handshake for {DisplayName} before PeerInfo " +
-                       $"({elapsed}; expected GUID '{Name}', client version >= {MinimumRequiredVersion}, server version {CurrentVersion}, " +
+                       $"({elapsed}; expected GUID '{Name}', client version >= {localMinimumRequiredVersion}, server version {CurrentVersion}, " +
                        $"server ConditionalConfigSync {PluginInfoCCS.PluginVersion}, protocol {PluginInfoCCS.ProtocolVersion}). " +
                        "No version payload for this mod was received. Possible causes include a missing or disabled client mod, an older pre-CCS mod build, " +
                        "Conditional Config Sync missing or failing to load, or duplicate or outdated DLL files." + malformed;
@@ -385,9 +424,9 @@ public partial class VersionCheck
                        $"client ConditionalConfigSync {FormatPackageVersion(state)}, protocol {FormatProtocol(state)}).";
             case VersionFailureKind.LocalVersionInvalid:
                 return $"Disconnect: The server has an invalid local {DisplayName} version requirement " +
-                       $"(server version '{CurrentVersion}', server minimum '{MinimumRequiredVersion}'). The {client} cannot be validated.";
+                       $"(server version '{CurrentVersion}', server minimum '{localMinimumRequiredVersion}'). The {client} cannot be validated.";
             case VersionFailureKind.RemoteVersionTooOld:
-                return $"Disconnect: The {client} has {DisplayName} version {state!.CurrentVersion}, but the server requires at least {MinimumRequiredVersion} " +
+                return $"Disconnect: The {client} has {DisplayName} version {state!.CurrentVersion}, but the server requires at least {localMinimumRequiredVersion} " +
                        $"({elapsed}; client ConditionalConfigSync {FormatPackageVersion(state)}, protocol {FormatProtocol(state)}).";
             case VersionFailureKind.LocalVersionTooOld:
                 return $"Disconnect: The {client} requires {DisplayName} version {state!.MinimumRequiredVersion}, but the server has {CurrentVersion} " +
@@ -400,20 +439,22 @@ public partial class VersionCheck
     private DisconnectReasonItem ClientVisibleServerError(ZRpc rpc)
     {
         receivedClientHandshakes.TryGetValue(rpc, out VersionHandshakeState? state);
-        VersionFailureKind failure = GetFailure(state, CurrentVersion, MinimumRequiredVersion);
-        return CreateDisconnectReasonItem(failure, state, remoteIsClient: true);
+        string localMinimumRequiredVersion = GetMinimumRequiredVersionForPeer(rpc);
+        VersionFailureKind failure = GetFailure(state, CurrentVersion, localMinimumRequiredVersion);
+        return CreateDisconnectReasonItem(failure, state, localMinimumRequiredVersion, remoteIsClient: true);
     }
 
     private DisconnectReasonItem ClientVisibleClientError()
     {
         VersionHandshakeState? state = receivedServerHandshake;
         VersionFailureKind failure = GetFailure(state, CurrentVersion, MinimumRequiredVersion);
-        return CreateDisconnectReasonItem(failure, state, remoteIsClient: false);
+        return CreateDisconnectReasonItem(failure, state, MinimumRequiredVersion, remoteIsClient: false);
     }
 
     private DisconnectReasonItem CreateDisconnectReasonItem(
         VersionFailureKind failure,
         VersionHandshakeState? state,
+        string localMinimumRequiredVersion,
         bool remoteIsClient)
     {
         string remoteSide = remoteIsClient ? "client" : "server";
@@ -426,7 +467,7 @@ public partial class VersionCheck
             case VersionFailureKind.HandshakeMissing:
                 code = DisconnectReasonCode.HandshakeMissing;
                 message = remoteIsClient
-                    ? $"The server did not receive the required synchronization handshake. The server requires {DisplayName} {MinimumRequiredVersion} or newer and Conditional Config Sync protocol {PluginInfoCCS.ProtocolVersion}."
+                    ? $"The server did not receive the required synchronization handshake. The server requires {DisplayName} {localMinimumRequiredVersion} or newer and Conditional Config Sync protocol {PluginInfoCCS.ProtocolVersion}."
                     : "No version handshake was received from the server.";
                 break;
             case VersionFailureKind.ProtocolMissing:
@@ -448,7 +489,7 @@ public partial class VersionCheck
                 break;
             case VersionFailureKind.RemoteVersionTooOld:
                 code = DisconnectReasonCode.RemoteVersionTooOld;
-                message = $"The {remoteSide} has version {state!.CurrentVersion}, but the {localSide} requires at least {MinimumRequiredVersion}.";
+                message = $"The {remoteSide} has version {state!.CurrentVersion}, but the {localSide} requires at least {localMinimumRequiredVersion}.";
                 break;
             case VersionFailureKind.LocalVersionTooOld:
                 code = DisconnectReasonCode.LocalVersionTooOld;
@@ -514,7 +555,10 @@ public partial class VersionCheck
 
     private static VersionCheck[] GetFailedServer(ZRpc rpc)
     {
-        return versionChecks.Where(check => check.ModRequired && !check.ValidatedClients.Contains(rpc)).ToArray();
+        return versionChecks
+            .Where(check => !check.ValidatedClients.Contains(rpc)
+                            && (check.IsRequiredForPeer(rpc) || check.ShouldValidateAdvertisedClient(rpc)))
+            .ToArray();
     }
 
     private static void Logout()
@@ -863,7 +907,7 @@ public partial class VersionCheck
                 if (server)
                 {
                     check.receivedClientHandshakes[rpc] = state;
-                    if (check.IsVersionOk(state))
+                    if (check.IsVersionOk(state, rpc))
                     {
                         check.ValidatedClients.Add(rpc);
                     }
@@ -1032,28 +1076,36 @@ public partial class VersionCheck
             {
                 check.RefreshFromConfigSync();
                 check.ResetPeerState(peerRpc);
+                // Admission policy is snapshotted per connection so a policy reload cannot change the result halfway
+                // through an already-started handshake. Reloaded requirements apply to later connection attempts.
+                check.SnapshotRequirementForPeer(peerRpc);
             }
             else
             {
                 check.Initialize();
             }
 
-            // If the mod is not required, then it is enough for only one side to do the check.
-            if (!check.ModRequired && !server)
+            // Conditional consumers always advertise their presence from the client. The server may have overridden an
+            // author-default optional requirement to required and must be able to distinguish an installed consumer from
+            // a genuinely missing one. Fixed optional consumers retain the original one-sided handshake behavior.
+            if (!server && !check.ShouldSendClientHandshake())
             {
                 continue;
             }
 
+            string minimumRequiredVersion = server
+                ? check.GetMinimumRequiredVersionForPeer(peerRpc)
+                : check.MinimumRequiredVersion;
             ConditionalConfigSync.VersionDebugLog(
                 "Version",
                 check.DisplayName,
-                $"Sending version {check.CurrentVersion}, minimum {check.MinimumRequiredVersion}, " +
+                $"Sending version {check.CurrentVersion}, minimum {minimumRequiredVersion}, " +
                 $"ConditionalConfigSync {PluginInfoCCS.PluginVersion} protocol {PluginInfoCCS.ProtocolVersion} to the " +
                 $"{FormatRemotePeer(peerRpc, server ? "client" : "server")}");
 
             ZPackage zpackage = GameReflection.NewPackage();
             GameReflection.PackageWrite(zpackage, check.Name);
-            GameReflection.PackageWrite(zpackage, check.MinimumRequiredVersion);
+            GameReflection.PackageWrite(zpackage, minimumRequiredVersion);
             GameReflection.PackageWrite(zpackage, check.CurrentVersion);
             GameReflection.PackageWrite(zpackage, PluginInfoCCS.ProtocolVersion);
             GameReflection.PackageWrite(zpackage, PluginInfoCCS.PluginVersion);
@@ -1140,6 +1192,7 @@ public partial class VersionCheck
             check.receivedServerHandshake = null;
             check.receivedClientHandshakes.Clear();
             check.ValidatedClients.Clear();
+            check.requiredClients.Clear();
         }
 
         if (preserveConnectionError && GetCurrentPendingDisconnectReport() != null)
@@ -1173,6 +1226,7 @@ public partial class VersionCheck
         {
             check.ValidatedClients.Remove(rpc);
             check.receivedClientHandshakes.Remove(rpc);
+            check.requiredClients.Remove(rpc);
         }
     }
 

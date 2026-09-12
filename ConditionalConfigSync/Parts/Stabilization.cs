@@ -794,12 +794,15 @@ public partial class ConditionalConfigSync
         {
             syncPolicyWatcher?.Dispose();
             hiddenConfigsWatcher?.Dispose();
+            modRequirementsWatcher?.Dispose();
             syncPolicyWatcher = null;
             hiddenConfigsWatcher = null;
+            modRequirementsWatcher = null;
             policySupportInitialized = false;
             policyReloadScheduled = false;
             syncPolicy = new Dictionary<string, ConfigPolicyOverride>(StringComparer.OrdinalIgnoreCase);
             hiddenConfigPolicy = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            modRequirementPolicy = new Dictionary<string, ModRequirementPolicyOverride>(StringComparer.OrdinalIgnoreCase);
             Interlocked.Increment(ref policyReadGeneration);
             policyAppliedGeneration = policyReadGeneration;
         }

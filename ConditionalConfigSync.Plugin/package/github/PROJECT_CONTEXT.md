@@ -4,7 +4,7 @@ This document is the durable engineering context for Conditional Config Sync (CC
 
 Read this file before making architectural, networking, compatibility, policy, lifecycle, or packaging changes. Read the current source code as the final authority when implementation details have evolved, and update this document whenever a project decision changes.
 
-## Current handoff snapshot — 2026-08-20
+## Current handoff snapshot — 2026-09-12
 
 This section is the shortest path for starting a new chat or resuming work after context loss. It records the exact accepted baseline, the current unreleased release state, the incident that motivated the latest work, and the non-negotiable implementation decisions. The remainder of this document contains the deeper architecture and historical rationale.
 
@@ -32,18 +32,71 @@ The current 1.0.4 work starts from the corrected 1.0.3 state plus the version-di
 
 For the 1.0.5 work started on 2026-08-20, the authoritative baseline is the owner-supplied `ConditionalConfigSync.zip` from this chat, SHA-256 `7f06152b4e8a412bb0ddeb91c4160629d9733b126f00ceb08bffa38a7b92e3a5`. That archive already contains the accepted 1.0.4 connection diagnostics, optional-server ownership fix, disconnect-reason UI integration, Visual Studio project-tree fix, packaging metadata, and the full durable project context. Do not reconstruct 1.0.5 from one of the older generated archives when this baseline is available.
 
+For the 1.0.6 conditional mod-requirement work started on 2026-09-12, the authoritative baseline is the owner-supplied `ConditionalConfigSync(5).zip`, SHA-256 `b8d8ab6c6cc65d68a79e15351cf54e0786c2ad245d6622b280075ac28407982f`. It already contains the accepted 1.0.5 snapshot-cache implementation and the later connection-rejection diagnostics. The 1.0.6 work is an additive public API and server admission-policy feature; do not reconstruct it from older handoffs.
+
 ### Current release identity
 
-- Package version: `1.0.5`
+- Package version: `1.0.6`
 - CCS wire protocol: `1`
 - Disconnect-report subformat: `1`
 - Core `AssemblyVersion`: `1.0.0.0`
-- Core and plugin file/informational version: `1.0.5`
+- Core and plugin file/informational version: `1.0.6`
 - BepInEx GUID and Harmony owner: `_shudnal.ConditionalConfigSync`
 - Jotunn Harmony owner used only for patch ordering: `com.jotunn.jotunn`
 - ServerSync Harmony owner used only for patch ordering: `org.bepinex.helpers.ServerSync`
 
 The additional package-version string in the ordinary version handshake is an optional trailing protocol-1 field. It does not justify a CCS protocol bump. The disconnect report is a separate best-effort RPC with its own internal format version and likewise does not change the main protocol.
+
+### 1.0.6 conditional mod requirements
+
+Version 1.0.6 adds an explicit admission-policy mode for `ModRequired` without changing the existing `ModRequired` member, core assembly identity, or protocol-1 version packet. The feature is intentionally additive so consumers compiled against 1.0.5 continue to load and retain their exact fixed requirement behavior without recompilation.
+
+The public contract is:
+
+```csharp
+public bool ModRequired { get; set; } = false;
+public ModRequirementMode ModRequirementMode { get; set; } = ModRequirementMode.Fixed;
+```
+
+`ModRequirementMode.Fixed` is the backward-compatible default. Existing consumers therefore remain fixed even when the server has a `ModRequirements.cfg` rule for their GUID. `ModRequirementMode.Conditional` is an explicit author opt-in allowing a server administrator to override the author's `ModRequired` default for incoming clients only.
+
+The policy is intentionally asymmetric:
+
+- the client-side requirement remains the author's local `ModRequired` value; a client with `ModRequired = true` still refuses to join a server that does not provide the consumer;
+- the server may apply `+ ModGuid` (`ForceRequired`) or `- ModGuid` (`ForceOptional`) from `ConditionalConfigSync.ModRequirements.cfg` only when that consumer uses `ModRequirementMode.Conditional`;
+- a server override never becomes a synchronized config value and is never trusted from a client;
+- this is consumer compatibility policy, not a general allow/deny list for unrelated client mods.
+
+Conditional consumers always advertise their existing version handshake from the client, even when the author default is optional. This is necessary because a server may force an author-default optional consumer to required and must distinguish "installed and compatible" from "missing" before `PeerInfo` admission. Fixed optional consumers retain the original one-sided handshake behavior. No new field is added to the packet, so the main CCS protocol remains `1`.
+
+Valheim 1.0.12 source at `assemblies_combined` commit `62d166f0baddaf3ab09ee51ce268859040dc2000` was checked for the unmodded-peer path. `ZRpc.HandlePackage` invokes a direct RPC only when its method hash is registered, and `ZRoutedRpc.HandleRoutedRPC` likewise invokes a routed method only when it exists in `m_functions`. Unknown CCS handshake and synchronization methods are therefore ignored by vanilla peers, matching the pre-existing `ModRequired = false` transport model. Conditional admission does not require a new capability-negotiation packet or a different synchronization transport.
+
+When the server's effective Conditional requirement is optional, a missing client consumer is accepted. If a client does advertise that Conditional consumer, normal mod-version and CCS protocol validation still applies; `ForceOptional` is not an instruction to ignore an incompatible installed copy. An author-default required consumer therefore keeps its normal minimum-version fallback even when the server permits absence. Conversely, `ForceRequired` on an author-default optional consumer uses the existing required-consumer `CurrentVersion` fallback when `MinimumRequiredVersion` was not explicitly supplied. Existing `Fixed + ModRequired = false` behavior is preserved and is not retroactively tightened.
+
+The effective server requirement is snapshotted per `ZRpc` during `OnNewConnection`. A policy reload therefore affects only later connection attempts. It never changes an admission decision halfway through a handshake and never disconnects already connected peers. The per-peer snapshot is cleared on disconnect and session reset.
+
+The server-only policy file is:
+
+```text
+BepInEx/config/shudnal.ConditionalConfigSync/ConditionalConfigSync.ModRequirements.cfg
+```
+
+It participates in the same stable read, file-watcher, reload, validation, status, and policy-dump pipeline as `SyncPolicy.cfg` and `HiddenConfigs.cfg`. Requirement rules are exact consumer GUIDs only; unlike config ownership policy they do not have section or setting targets.
+
+Compatibility requirements for this feature:
+
+- core `AssemblyVersion` remains `1.0.0.0`;
+- `PluginInfoCCS.ProtocolVersion` remains `1`;
+- no existing public member is removed, renamed, or changes type/signature;
+- `ModRequirementMode` defaults to `Fixed`;
+- unchanged consumers compiled against CCS 1.0.5 must load against the 1.0.6 core DLL without rebuilding;
+- only consumers that set `ModRequirementMode.Conditional` need to declare CCS 1.0.6 as their minimum package dependency.
+
+#### 1.0.6 implementation and validation handoff
+
+The 1.0.6 source handoff adds `ModRequirementMode.cs`, extends `ConditionalConfigSync.cs`, `VersionCheck.cs`, `Parts/Policy.cs`, and policy watcher cleanup, updates package metadata to 1.0.6, and synchronizes README/CHANGELOG/PROJECT_CONTEXT staging copies. The stale 1.0.5 `SHA256SUMS.txt` was removed from the source handoff because no 1.0.6 binaries were built; the existing packaging target regenerates checksums from the actual compiled DLLs before creating the Thunderstore archive.
+
+Static verification for this handoff includes structured XML/JSON parsing, normalized public-declaration comparison against the supplied 1.0.5 baseline, protocol/core-assembly identity checks, C# lexical delimiter/string/comment balance, staged-document byte equality, generated-binary absence, and accidental-Cyrillic scanning. Per the maintainer workflow for Valheim mods, this handoff is not compiled or runtime-tested here. Runtime verification must cover the Conditional requirement cases in the global regression matrix below.
 
 ### 1.0.5 full-sync snapshot cache and serialization diagnostics
 
@@ -801,6 +854,14 @@ The summary format is:
 
 Hidden rules affect compatible configuration-manager presentation only. Every resolved record is intentionally logged as a warning because it removes a setting from the normal UI. Hidden policy is not access control. A hidden server-controlled config is still protected by ownership and lock validation; a hidden client-controlled config can still be edited through files or other tools.
 
+### `ConditionalConfigSync.ModRequirements.cfg`
+
+Mod-requirement rules target one exact registered consumer GUID. `+` means `ForceRequired`; `-` means `ForceOptional`. Rules are effective only for consumers whose authors selected `ModRequirementMode.Conditional`; fixed consumers log/validate the record as ignored.
+
+Every record is preserved in file order for diagnostics. A rule that changes the author default is a warning because the administrator is deliberately changing the mod author's recommended admission contract. A same-as-default rule is informational. Unknown GUIDs and malformed/duplicate/conflicting records are reported by policy diagnostics.
+
+Requirement policy is evaluated locally on the server before normal config synchronization and is not broadcast as config state. A reload changes the effective requirement used for new `ZRpc` admission snapshots only. Existing connected peers and in-progress snapshots are not rewritten or disconnected.
+
 ### Stable file loading
 
 Policy reads retry until file metadata is stable. This protects against common editor save patterns such as truncate-write-rename and avoids replacing a valid policy with a partially written snapshot. File watcher callbacks queue work to the Unity main thread before mutating runtime state.
@@ -904,21 +965,38 @@ A config or custom value registered after the normal startup window must not rem
 - A `ConfigSync` instance created after connection registers its RPC handlers and requests its first complete package.
 - Mods that rebuild a dynamic registration set may call `RequestFullSync()` explicitly.
 
-A late resync updates data and policy state. It does not retroactively repeat the completed Valheim peer admission and version check. Mods requiring connection rejection must create their `ConfigSync` and set `ModRequired` before connection.
+A late resync updates data and policy state. It does not retroactively repeat the completed Valheim peer admission and version check. Mods requiring connection admission enforcement must create their `ConfigSync` and set `ModRequired`/`ModRequirementMode` before connection.
 
-## `ModRequired` semantics
+## `ModRequired` and mod-requirement policy semantics
 
-`ModRequired` controls whether the owning mod must exist compatibly on the remote side. It is independent from the local hard dependency on CCS itself.
+`ModRequired` is the owning mod author's default remote-installation requirement. It is independent from the local hard dependency on CCS itself. `ModRequirementMode` determines whether the server may override that default for incoming clients.
 
-- On a client with `ModRequired = true`, the server must have a compatible copy of the owning mod.
-- On a server with `ModRequired = true`, connecting clients must have a compatible copy of the owning mod.
-- With `ModRequired = false`, the remote side may lack the owning mod.
-- After successful client peer admission, a pre-existing optional client instance with no matching server handshake returns to local source-of-truth ownership instead of remaining a fail-closed replica.
-- That local fallback path does not set `InitialSyncDone`, does not raise `InitialSyncCompleted`, and does not allow client-to-server publication.
+### Fixed requirement
 
-Set it before connection. Late changes cannot retroactively redo an already completed handshake.
+`ModRequirementMode.Fixed` is the default and preserves the pre-1.0.6 contract exactly:
 
-A mod such as Seasons that requires matching runtime definitions must use `ModRequired = true`. A small optional client/server-compatible mod may deliberately use false.
+- on a client with `ModRequired = true`, the server must have a compatible copy of the owning mod;
+- on a server with `ModRequired = true`, connecting clients must have a compatible copy;
+- with `ModRequired = false`, the remote side may lack the owning mod;
+- server requirement-policy records are ignored.
+
+This default is the binary-compatibility path for consumers compiled against CCS 1.0.5 and earlier supported 1.x APIs. They do not know about `ModRequirementMode`, so the new property remains `Fixed` automatically when they run against the newer DLL.
+
+### Conditional requirement
+
+`ModRequirementMode.Conditional` is an explicit author opt-in. The author's `ModRequired` value remains the default and still controls the local client's requirement that the server provide the mod. The server may independently override whether **incoming clients** must provide it:
+
+- `+ ModGuid` in `ConditionalConfigSync.ModRequirements.cfg` forces `Required`;
+- `- ModGuid` forces `Optional`;
+- no matching rule preserves the author's `ModRequired` default.
+
+A Conditional consumer always sends its normal version handshake from a modded client, including when the author default is optional. This allows the server to force an optional-by-default consumer to required. If the server's effective requirement is optional, complete absence of the consumer is allowed; if the client advertises the consumer, its normal version/protocol compatibility checks still apply.
+
+The server snapshots the effective requirement per `ZRpc` at `OnNewConnection`. Policy reload changes only later connection attempts and never retroactively disconnects peers. The snapshot must be cleared on disconnect and session reset.
+
+After successful client peer admission, a client instance whose own author default is optional and which received no matching server handshake returns to local source-of-truth ownership instead of remaining a fail-closed replica. That local fallback path does not set `InitialSyncDone`, does not raise `InitialSyncCompleted`, and does not allow client-to-server publication. A server-side `ForceOptional` override does not alter this client-side rule.
+
+Set `ModRequired` and `ModRequirementMode` before connection. Late changes cannot retroactively redo an already completed handshake. A mod such as Seasons that fundamentally requires matching runtime definitions should normally remain `Fixed + true`; a mod author should choose `Conditional` only when the server may knowingly accept degraded behavior from clients that cannot install the mod.
 
 ## Version checking
 
@@ -1117,44 +1195,59 @@ At minimum, run or reproduce the following before a release that touches synchro
 34. Late register a config and custom value on server and client: one batched resync supplies correct state.
 35. Reconnect to a different server: no fragment, policy, admin, pending-update, or value state leaks from the previous session.
 
+### Conditional mod requirements
+
+36. Unchanged consumer DLL compiled against CCS 1.0.5 with `ModRequired = true`: load it against the 1.0.6 core without rebuilding; behavior remains fixed-required and a `ModRequirements.cfg` override is ignored.
+37. Repeat with an unchanged `ModRequired = false` consumer: fixed-optional one-sided handshake and optional-server local fallback remain unchanged.
+38. `Conditional + default Required`, no policy rule: modded client/server connect; an unmodded client is rejected.
+39. `Conditional + default Required`, `- ModGuid`: an unmodded/crossplay client with no CCS consumer is admitted and safely ignores unknown CCS RPCs, while a modded client still synchronizes normally.
+40. A modded client with `Conditional + default Required` still rejects a server where the consumer is completely absent; server `ForceOptional` never weakens that client-side author default.
+41. `Conditional + default Optional`, no policy rule: client advertises the consumer but an unmodded client is accepted.
+42. `Conditional + default Optional`, `+ ModGuid`: a compatible modded client is accepted and a missing client consumer is rejected; when no explicit `MinimumRequiredVersion` exists, server admission uses the required-consumer `CurrentVersion` fallback.
+43. Effective Optional with an advertised incompatible Conditional consumer: normal version/protocol validation rejects it; optionality permits absence, not incompatible presence.
+44. Reload Required -> Optional or Optional -> Required while a client is already handshaking: that connection keeps the requirement snapshot captured at `OnNewConnection`; only later attempts use the new rule. Existing connected peers are never disconnected.
+45. `policy_validate` reports malformed, duplicate, conflicting, unknown, and Fixed-mode requirement records; `policy_dump` and `status` show author mode/default and current effective server requirement.
+
 ### Custom values
 
-36. Normal custom value equal assignments coalesce/suppress as documented.
-37. Sequenced equal assignments are delivered as separate events in order.
-38. Unauthorized direct custom-value change on a client is restored.
-39. Deferred custom changes made during package processing flush with correct state/event semantics.
+46. Normal custom value equal assignments coalesce/suppress as documented.
+47. Sequenced equal assignments are delivered as separate events in order.
+48. Unauthorized direct custom-value change on a client is restored.
+49. Deferred custom changes made during package processing flush with correct state/event semantics.
 
 ### Transport and robustness
 
-40. Compression and fragmentation boundaries round-trip correctly.
-41. Duplicate, missing, inconsistent, expired, and oversized fragments are rejected and cleaned.
-42. Payload and entry limits reject explicitly without unbounded memory growth.
-43. One failing subscriber or one failed entry does not crash synchronization processing for unrelated entries.
-44. During initial connection, `PeerInfo`, `PlayerList`, and `AdminList` are released in a safe order; the initial player list is populated and `LocalPlayerIsAdminOrHost()` is correct without waiting for a later refresh.
-45. Initial handshake buffering preserves package cursors, package contents, and the relative `VersionMatch` position for both normal completion and synchronization failure paths.
-46. Successful server-side version receive logs include the same remote identifier later used in disconnect diagnostics.
-47. Missing handshake, missing protocol field, explicit protocol mismatch, invalid version strings, client-too-old, and server-too-old cases produce distinct unconditional error messages.
-48. Two overlapping client handshakes retain independent per-peer received state and cannot change each other's rejection reason.
-49. A current rejected client receives one bounded structured disconnect report before `ErrorVersion`; report count, field lengths, reason codes, and trailing bytes are validated.
-50. An older client without the report handler still disconnects normally and the server retains the detailed unconditional error log.
-51. A current client preserves the pending report across failed `ZNet.Shutdown`, appends it once on the main menu, and clears it after display.
-52. A new connection generation cannot display a report captured by the previous `ZRpc`.
-53. A successful admission clears pending report, malformed-handshake, and unknown-consumer state.
-54. A report older than the configured lifetime is ignored.
-55. A Jotunn-, ServerSync-, or vanilla-originated `ErrorVersion` without an already-created CCS report does not cause CCS to append a speculative explanation.
-56. Without Jotunn or ServerSync, the vanilla panel displays the CCS explanation and the button moves only by the final missing height.
-57. With ServerSync, both diagnostics remain present and the deferred layout pass does not repeatedly move the button.
-58. With Jotunn, the vanilla panel is hidden by Jotunn, only Jotunn's compatibility window remains, and its failed-connection area includes the CCS text.
-59. With both Jotunn and ServerSync, Jotunn receives the final combined text and no second CCS modal is created.
-60. Protocol 1 peers without the optional CCS package-version string remain compatible and are logged as `not reported`.
-61. Early unreleased 1.0.4 plain-string disconnect reports are accepted by the current client fallback.
-62. Malformed report format, excessive reason count, an oversized total package, and trailing data produce a bounded generic client explanation and an unconditional client error log; individually overlong display fields are normalized and truncated within the accepted package.
+50. Compression and fragmentation boundaries round-trip correctly.
+51. Duplicate, missing, inconsistent, expired, and oversized fragments are rejected and cleaned.
+52. Payload and entry limits reject explicitly without unbounded memory growth.
+53. One failing subscriber or one failed entry does not crash synchronization processing for unrelated entries.
+54. During initial connection, `PeerInfo`, `PlayerList`, and `AdminList` are released in a safe order; the initial player list is populated and `LocalPlayerIsAdminOrHost()` is correct without waiting for a later refresh.
+55. Initial handshake buffering preserves package cursors, package contents, and the relative `VersionMatch` position for both normal completion and synchronization failure paths.
+56. Successful server-side version receive logs include the same remote identifier later used in disconnect diagnostics.
+57. Missing handshake, missing protocol field, explicit protocol mismatch, invalid version strings, client-too-old, and server-too-old cases produce distinct unconditional error messages.
+58. Two overlapping client handshakes retain independent per-peer received state and cannot change each other's rejection reason.
+59. A current rejected client receives one bounded structured disconnect report before `ErrorVersion`; report count, field lengths, reason codes, and trailing bytes are validated.
+60. An older client without the report handler still disconnects normally and the server retains the detailed unconditional error log.
+61. A current client preserves the pending report across failed `ZNet.Shutdown`, appends it once on the main menu, and clears it after display.
+62. A new connection generation cannot display a report captured by the previous `ZRpc`.
+63. A successful admission clears pending report, malformed-handshake, and unknown-consumer state.
+64. A report older than the configured lifetime is ignored.
+65. A Jotunn-, ServerSync-, or vanilla-originated `ErrorVersion` without an already-created CCS report does not cause CCS to append a speculative explanation.
+66. Without Jotunn or ServerSync, the vanilla panel displays the CCS explanation and the button moves only by the final missing height.
+67. With ServerSync, both diagnostics remain present and the deferred layout pass does not repeatedly move the button.
+68. With Jotunn, the vanilla panel is hidden by Jotunn, only Jotunn's compatibility window remains, and its failed-connection area includes the CCS text.
+69. With both Jotunn and ServerSync, Jotunn receives the final combined text and no second CCS modal is created.
+70. Protocol 1 peers without the optional CCS package-version string remain compatible and are logged as `not reported`.
+71. Early unreleased 1.0.4 plain-string disconnect reports are accepted by the current client fallback.
+72. Malformed report format, excessive reason count, an oversized total package, and trailing data produce a bounded generic client explanation and an unconditional client error log; individually overlong display fields are normalized and truncated within the accepted package.
 
 ### Compatibility
 
-63. Load an unchanged test consumer DLL compiled against the first public 1.x CCS API with the new core DLL; do not rebuild the consumer.
-64. Compare the new public API against the retained 1.x baseline and investigate every removal or signature change.
-65. Test a compatible older CCS client/server format whenever validation or package entry handling changes.
+73. Load an unchanged test consumer DLL compiled against the first public 1.x CCS API with the new core DLL; do not rebuild the consumer.
+74. Compare the new public API against the retained 1.x baseline and investigate every removal or signature change.
+75. Test a compatible older CCS client/server format whenever validation or package entry handling changes.
+
+The 1.0.6 requirement-policy feature is additive. API compatibility review must specifically confirm that adding `ModRequirementMode` and the new property did not change the metadata identity or signatures of existing members. The unchanged old-consumer test must cover both fixed-required and fixed-optional consumers. Protocol-1 interoperability must be checked because Conditional consumers send the same existing version packet in an additional previously-optional case.
 
 ## Compatibility verification requirement
 
@@ -1203,7 +1296,8 @@ A dependent mod should declare the minimum CCS package version that provides the
 
 - `ConditionalConfigSync.cs`: central instance state, public registration API, locking registration, shared metadata.
 - `ConfigSync.cs`: compatibility class.
-- `ConfigSyncMode.cs`: ownership mode contract.
+- `ConfigSyncMode.cs`: config ownership mode contract.
+- `ModRequirementMode.cs`: fixed/conditional remote-mod admission contract.
 - `SyncedConfigEntry.cs`: config wrapper, local/server/accepted value state, typed API.
 - `CustomSyncedValue.cs`: state and sequenced runtime value APIs.
 - `ConfigurationManagerAttributes.cs`: UI interoperability tags.
@@ -1220,7 +1314,7 @@ A dependent mod should declare the minimum CCS package version that provides the
 - `ConfigState.cs`: write permissions, UI metadata, fallback serialization, rejected-write restoration.
 - `Packages.cs`: entry serialization/deserialization, config state application, custom value application, package construction.
 - `Transport.cs`: RPC handlers, client authorization, canonical broadcast, compression, fragmentation, queues, shutdown reset.
-- `Policy.cs`: policy files, record resolution, ownership/hidden computation, runtime policy changes, logs and commands.
+- `Policy.cs`: config ownership, hidden-setting, and mod-requirement policy files; record resolution; effective-state computation; reload/validation/dump/status diagnostics.
 - `Stabilization.cs`: RPC registration, late registration, resync, protocol validation, session cleanup.
 - `Diagnostics.cs`: debug config, events, rejection reporting, status and console diagnostics.
 

@@ -64,24 +64,40 @@ public partial class ConditionalConfigSync
     public string? MinimumRequiredVersion;
 
     /// <summary>
-    /// Gets or sets whether the owning mod must be installed and compatible on the remote peer.
+    /// Gets or sets the author's default requirement for the owning mod to be installed and compatible on the remote peer.
     /// </summary>
     /// <remarks>
-    /// Set this to <see langword="true"/> for mods that require matching code on both sides of the connection.
-    /// On a client, the connected server must have a compatible copy of the mod. On a server, every connecting
-    /// client must have a compatible copy. Missing or incompatible copies reject the connection during the normal
-    /// peer version handshake.
+    /// With the default <see cref="ModRequirementMode.Fixed"/> mode, this preserves the original CCS behavior: a
+    /// <see langword="true"/> value requires a compatible copy on both sides and a <see langword="false"/> value allows
+    /// the remote side to omit the mod.
     /// <para>
-    /// Leave this <see langword="false"/> only when the mod can operate correctly while absent from the remote side,
-    /// such as a genuinely client-only or otherwise optional integration. The local BepInEx hard dependency on
-    /// Conditional Config Sync is separate: it requires CCS on the same machine as the owning mod, not automatically
-    /// on the remote server or client. After successful client admission without a matching server handshake, the
-    /// optional instance returns to local source-of-truth ownership; this does not count as a completed server sync.
+    /// When <see cref="ModRequirementMode"/> is <see cref="ModRequirementMode.Conditional"/>, a server policy may override
+    /// this default only when deciding whether its connecting clients must provide the mod. The local client-side
+    /// requirement remains this author-defined value, so a mod with <c>ModRequired = true</c> still refuses to join a
+    /// server where the mod is absent even when that server allows unmodded clients.
+    /// </para>
+    /// <para>
+    /// The local BepInEx hard dependency on Conditional Config Sync is separate: it requires CCS on the same machine as
+    /// the owning mod, not automatically on the remote server or client. After successful client admission without a
+    /// matching server handshake, an optional client instance returns to local source-of-truth ownership; this does not
+    /// count as a completed server sync.
     /// </para>
     /// <para>Set this before a connection is established, preferably in the object initializer.</para>
     /// </remarks>
-    [Description("Whether the owning mod must be installed and compatible on the remote peer.")]
+    [Description("Author-defined default for whether the owning mod must exist compatibly on the remote peer.")]
     public bool ModRequired { get; set; } = false;
+
+    /// <summary>
+    /// Gets or sets whether the server may override <see cref="ModRequired"/> for incoming-client admission.
+    /// </summary>
+    /// <remarks>
+    /// The default <see cref="ModRequirementMode.Fixed"/> value keeps existing consumers fully
+    /// backward compatible. <see cref="ModRequirementMode.Conditional"/> opts this consumer into
+    /// the server-only <c>ConditionalConfigSync.ModRequirements.cfg</c> policy. Requirement changes affect only new
+    /// connection attempts and do not disconnect existing peers.
+    /// </remarks>
+    [Description("Whether the server may override the author-defined ModRequired default for incoming clients.")]
+    public ModRequirementMode ModRequirementMode { get; set; } = ModRequirementMode.Fixed;
 
     /// <summary>
     /// Allows an unlocked non-admin client to send config and custom-value changes to the server.
