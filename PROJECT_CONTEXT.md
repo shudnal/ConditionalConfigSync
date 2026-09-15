@@ -4,7 +4,7 @@ This document is the durable engineering context for Conditional Config Sync (CC
 
 Read this file before making architectural, networking, compatibility, policy, lifecycle, or packaging changes. Read the current source code as the final authority when implementation details have evolved, and update this document whenever a project decision changes.
 
-## Current handoff snapshot — 2026-09-12
+## Current handoff snapshot — 2026-09-15
 
 This section is the shortest path for starting a new chat or resuming work after context loss. It records the exact accepted baseline, the current unreleased release state, the incident that motivated the latest work, and the non-negotiable implementation decisions. The remainder of this document contains the deeper architecture and historical rationale.
 
@@ -36,16 +36,22 @@ For the 1.0.6 conditional mod-requirement work started on 2026-09-12, the author
 
 ### Current release identity
 
-- Package version: `1.0.6`
+- Package version: `1.0.7`
 - CCS wire protocol: `1`
 - Disconnect-report subformat: `1`
 - Core `AssemblyVersion`: `1.0.0.0`
-- Core and plugin file/informational version: `1.0.6`
+- Core and plugin file/informational version: `1.0.7`
 - BepInEx GUID and Harmony owner: `_shudnal.ConditionalConfigSync`
 - Jotunn Harmony owner used only for patch ordering: `com.jotunn.jotunn`
 - ServerSync Harmony owner used only for patch ordering: `org.bepinex.helpers.ServerSync`
 
 The additional package-version string in the ordinary version handshake is an optional trailing protocol-1 field. It does not justify a CCS protocol bump. The disconnect report is a separate best-effort RPC with its own internal format version and likewise does not change the main protocol.
+
+### 1.0.7 PeerInfo handshake resend and Thunderstore-only packaging
+
+Version 1.0.7 keeps the original version advertisement from `ZNet.OnNewConnection` and sends the same idempotent version packet again immediately before each side calls vanilla `ZNet.SendPeerInfo(...)`. The resend uses the existing RPC name and payload and does not change admission timing, public API, core assembly identity, or protocol `1`. It reduces false `HandshakeMissing` rejections when a transient PlayFab or other transport recovery interrupts the early connection phase but the connection later reaches `PeerInfo`.
+
+Release packaging is now Thunderstore-only. `ConditionalConfigSync.Plugin/package/thunderstore` is the sole package staging directory, and its `CHANGELOG.md` is the canonical release changelog. The repository root no longer contains a changelog. GitHub release staging, `GenerateChecksums.ps1`, and `SHA256SUMS.txt` generation/copying were removed. The packaging target deletes any stale checksum file before creating the Thunderstore ZIP so an artifact from an older build cannot be shipped accidentally.
 
 ### 1.0.6 conditional mod requirements
 
@@ -94,7 +100,7 @@ Compatibility requirements for this feature:
 
 #### 1.0.6 implementation and validation handoff
 
-The 1.0.6 source handoff adds `ModRequirementMode.cs`, extends `ConditionalConfigSync.cs`, `VersionCheck.cs`, `Parts/Policy.cs`, and policy watcher cleanup, updates package metadata to 1.0.6, and synchronizes README/CHANGELOG/PROJECT_CONTEXT staging copies. The stale 1.0.5 `SHA256SUMS.txt` was removed from the source handoff because no 1.0.6 binaries were built; the existing packaging target regenerates checksums from the actual compiled DLLs before creating the Thunderstore archive.
+The 1.0.6 source handoff added `ModRequirementMode.cs`, extended `ConditionalConfigSync.cs`, `VersionCheck.cs`, `Parts/Policy.cs`, and policy watcher cleanup, and updated package metadata and documentation to 1.0.6. The later 1.0.7 packaging cleanup removed checksum generation and GitHub release staging; historical 1.0.6 handoff archives may still contain those obsolete artifacts.
 
 Static verification for this handoff includes structured XML/JSON parsing, normalized public-declaration comparison against the supplied 1.0.5 baseline, protocol/core-assembly identity checks, C# lexical delimiter/string/comment balance, staged-document byte equality, generated-binary absence, and accidental-Cyrillic scanning. Per the maintainer workflow for Valheim mods, this handoff is not compiled or runtime-tested here. Runtime verification must cover the Conditional requirement cases in the global regression matrix below.
 
@@ -217,7 +223,7 @@ Files intentionally changed in the core implementation for 1.0.5:
 - `Parts/Policy.cs`: snapshot invalidation when effective ownership/hidden policy state changes;
 - `PluginInfoCCS.cs` and `PluginSelfInfo.cs`: package version `1.0.5`, protocol still `1`.
 
-The public declaration shape of the core source was compared to the supplied 1.0.4 baseline after normalizing the package-version literal; no public declaration was added, removed, or signature-changed by this work. `VersionCheck.cs`, `Parts/PolicyControl.cs`, `SyncedConfigEntry.cs`, `ConfigSyncPolicyControlState.cs`, and `RuntimeGuard.cs` were verified unchanged from the supplied baseline. Root and staged README/CHANGELOG/PROJECT_CONTEXT copies were synchronized, project XML and manifest JSON parsed successfully, a lexical C# delimiter/string/comment balance check passed, and repository text outside binaries contained no Cyrillic.
+The public declaration shape of the core source was compared to the supplied 1.0.4 baseline after normalizing the package-version literal; no public declaration was added, removed, or signature-changed by this work. `VersionCheck.cs`, `Parts/PolicyControl.cs`, `SyncedConfigEntry.cs`, `ConfigSyncPolicyControlState.cs`, and `RuntimeGuard.cs` were verified unchanged from the supplied baseline. Repository and publication README copies were synchronized, project XML and manifest JSON parsed successfully, a lexical C# delimiter/string/comment balance check passed, and repository text outside binaries contained no Cyrillic.
 
 This execution environment does not provide `dotnet`, `msbuild`, `csc`, `mcs`, or the normal Valheim/BepInEx build reference tree, so 1.0.5 was not compiled or runtime-tested here. The deliverable produced from this environment must therefore be treated as a source project. Stale 1.0.4 `bin`/`obj`, staged DLL/XML/checksum artifacts, and the old generated package ZIP from the supplied reference must be removed from that source archive rather than represented as 1.0.5 binaries. The owner will compile and profile the result in the normal Visual Studio/Valheim environment.
 
@@ -258,7 +264,7 @@ Regression checks for packaging-project changes:
 
 - opening or reloading `ConditionalConfigSync.Plugin.csproj` in Visual Studio must not produce `LimitedFunctionality` or a duplicate `Thunderstore.targets` project-tree node;
 - `Thunderstore.targets` must still be imported and its packaging targets must remain available to MSBuild;
-- a normal plugin build must still stage the Thunderstore and GitHub release artifacts;
+- a normal plugin build must still stage and archive the Thunderstore package;
 - the project must not globally disable SDK default `None` items.
 
 ### 1.0.4 optional-server ownership fix and ConfigurationManager companion release
@@ -489,9 +495,9 @@ Functional code:
 Documentation:
 
 - `README.md`
-- `CHANGELOG.md`
 - `PROJECT_CONTEXT.md`
-- staged GitHub and Thunderstore README/CHANGELOG copies
+- `ConditionalConfigSync.Plugin/package/thunderstore/CHANGELOG.md`
+- the Thunderstore publication README copy
 
 No policy-control, configuration-ownership, synchronization-package, or transport behavior should change as part of this UI refinement.
 
@@ -523,7 +529,7 @@ Before release, perform at minimum:
 - verify no public API or assembly identity change;
 - verify protocol remains 1;
 - scan all repository text for accidental Cyrillic;
-- synchronize staged release documentation.
+- synchronize the repository README, Thunderstore publication README/changelog, and packaging documentation.
 
 ## Repository language and documentation policy
 
@@ -1271,8 +1277,8 @@ A dependent mod should declare the minimum CCS package version that provides the
 7. Build both assemblies against the intended Valheim/BepInEx references with no new warnings.
 8. Verify the plugin package contains both runtime DLLs and the core XML documentation.
 9. Verify dependent mod packages do not embed either CCS assembly.
-10. Generate and verify SHA-256 hashes for both runtime DLLs.
-11. Confirm README, CHANGELOG, PROJECT_CONTEXT, packaging documentation, and staged release copies are synchronized.
+10. Verify the generated Thunderstore archive contains only the intended runtime and documentation files.
+11. Confirm the repository and publication README files, the Thunderstore package changelog, PROJECT_CONTEXT, and packaging documentation are synchronized.
 12. Scan repository text for accidental Cyrillic outside intentional localization resources.
 13. Remove stale PDB/MDB files and stale binaries from package staging before creating release archives.
 14. Test installation on a clean client and dedicated server profile.
@@ -1286,9 +1292,8 @@ A dependent mod should declare the minimum CCS package version that provides the
 ### Repository root
 
 - `README.md`: public user, administrator, and mod-author documentation.
-- `CHANGELOG.md`: release-visible changes.
 - `PROJECT_CONTEXT.md`: durable engineering rationale and invariants.
-- `PACKAGING.md`: build and publication mechanics.
+- `PACKAGING.md`: Thunderstore build and publication mechanics.
 - `THIRD_PARTY_NOTICES.md`: retained notices and acknowledgements.
 - `Directory.Build.props`: common target framework, C# version, nullable, deterministic-build, documentation, and path settings.
 
@@ -1304,6 +1309,7 @@ A dependent mod should declare the minimum CCS package version that provides the
 - `GameReflection.cs`: validated runtime binding layer for non-public/publicized Valheim differences.
 - `RuntimeGuard.cs`: standalone assembly enforcement and Harmony identity.
 - `VersionCheck.cs`: peer admission, per-peer version/protocol diagnostics, structured disconnect reports, pending client-reason lifecycle, Jotunn/ServerSync-aware error-text injection, and vanilla-panel layout normalization.
+- `VersionCheck.PeerInfoResend.cs`: idempotent version-handshake resend immediately before vanilla `PeerInfo`.
 - `SynchronizationEvents.cs`: public lifecycle/policy/rejection event arguments.
 - `PluginInfoCCS.cs`: canonical package, plugin, repository, and protocol metadata.
 - `PluginSelfInfo.cs`: retained compatibility metadata alias; do not remove while existing consumers may reference it.
@@ -1321,8 +1327,8 @@ A dependent mod should declare the minimum CCS package version that provides the
 ### Plugin project
 
 - plugin entry point and lifecycle;
-- package targets and publication scripts;
-- Thunderstore and GitHub release staging.
+- package target and Thunderstore manifest updater;
+- canonical package changelog, Thunderstore staging, and ZIP creation.
 
 Keep responsibilities separated. Do not grow one giant synchronization class file again merely because partial classes make cross-file access easy.
 

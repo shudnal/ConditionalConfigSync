@@ -26,7 +26,6 @@ The Thunderstore package contains:
 - `ConditionalConfigSync.Plugin.dll` - the BepInEx bootstrap registered as `_shudnal.ConditionalConfigSync`;
 - `ConditionalConfigSync.dll` - the public API and synchronization runtime used by dependent mods;
 - `ConditionalConfigSync.xml` - IntelliSense documentation for IDEs and mod authors;
-- `SHA256SUMS.txt` - SHA-256 hashes of both release DLL files.
 
 Both DLL files must remain installed together. The XML and documentation files are optional at runtime but useful for development, verification, and redistribution.
 
@@ -530,7 +529,7 @@ Conditional Config Sync:
 - treats client configuration packages as untrusted input, validates permissions on the server, and never forwards the original client package;
 - writes only its policy, debug, dump, and diagnostic files under `BepInEx/config/shudnal.ConditionalConfigSync`;
 - uses reflection only to access Valheim runtime members whose accessibility differs from publicized development assemblies;
-- publishes unobfuscated binaries, XML API documentation, source code, and SHA-256 hashes for both DLL files.
+- publishes unobfuscated binaries, XML API documentation, and source code.
 
 ## Links
 
