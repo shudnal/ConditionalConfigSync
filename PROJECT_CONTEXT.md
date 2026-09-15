@@ -34,18 +34,26 @@ For the 1.0.5 work started on 2026-08-20, the authoritative baseline is the owne
 
 For the 1.0.6 conditional mod-requirement work started on 2026-09-12, the authoritative baseline is the owner-supplied `ConditionalConfigSync(5).zip`, SHA-256 `b8d8ab6c6cc65d68a79e15351cf54e0786c2ad245d6622b280075ac28407982f`. It already contains the accepted 1.0.5 snapshot-cache implementation and the later connection-rejection diagnostics. The 1.0.6 work is an additive public API and server admission-policy feature; do not reconstruct it from older handoffs.
 
+For the 1.0.8 whole-mod hidden-policy work started on 2026-09-15, the authoritative baseline is the owner-supplied `ConditionalConfigSync(7).zip`, SHA-256 `13da04ecbae850646b83f3ba01e9c374e44f9becb92581cc73de8c9d0e8a9da2`. It already contains the accepted 1.0.7 PeerInfo handshake resend and Thunderstore-only packaging cleanup.
+
 ### Current release identity
 
-- Package version: `1.0.7`
+- Package version: `1.0.8`
 - CCS wire protocol: `1`
 - Disconnect-report subformat: `1`
 - Core `AssemblyVersion`: `1.0.0.0`
-- Core and plugin file/informational version: `1.0.7`
+- Core and plugin file/informational version: `1.0.8`
 - BepInEx GUID and Harmony owner: `_shudnal.ConditionalConfigSync`
 - Jotunn Harmony owner used only for patch ordering: `com.jotunn.jotunn`
 - ServerSync Harmony owner used only for patch ordering: `org.bepinex.helpers.ServerSync`
 
 The additional package-version string in the ordinary version handshake is an optional trailing protocol-1 field. It does not justify a CCS protocol bump. The disconnect report is a separate best-effort RPC with its own internal format version and likewise does not change the main protocol.
+
+### 1.0.8 whole-mod hidden policy
+
+Version 1.0.8 allows `ConditionalConfigSync.HiddenConfigs.cfg` to target a complete registered consumer by its bare mod GUID. A matching whole-mod rule marks every config registered by that `ConditionalConfigSync` instance as hidden in compatible configuration managers. Exact-setting and section rules remain supported and may be combined with whole-mod rules.
+
+Whole-mod targeting is intentionally limited to hidden policy. `SyncPolicy.cfg` continues to accept only section and exact-setting identifiers, so adding a bare GUID to hidden policy does not implicitly introduce whole-mod ownership overrides. Hidden-policy validation and target resolution therefore use the mod GUID in addition to the existing section/setting identifiers, while synchronization-policy validation keeps its previous identifier set. This changes no public API, wire format, protocol number, or config ownership semantics.
 
 ### 1.0.7 PeerInfo handshake resend and Thunderstore-only packaging
 
@@ -858,7 +866,9 @@ The summary format is:
 
 ### `ConditionalConfigSync.HiddenConfigs.cfg`
 
-Hidden rules affect compatible configuration-manager presentation only. Every resolved record is intentionally logged as a warning because it removes a setting from the normal UI. Hidden policy is not access control. A hidden server-controlled config is still protected by ownership and lock validation; a hidden client-controlled config can still be edited through files or other tools.
+Hidden rules may target a bare registered mod GUID, a whole section, or one exact setting. A bare mod GUID hides every config registered by that `ConditionalConfigSync` instance. Whole-mod targets are intentionally accepted only by hidden policy; `SyncPolicy.cfg` continues to require section or exact-setting identifiers.
+
+Hidden rules affect compatible configuration-manager presentation only. Every resolved record is intentionally logged as a warning because it removes settings from the normal UI. Hidden policy is not access control. A hidden server-controlled config is still protected by ownership and lock validation; a hidden client-controlled config can still be edited through files or other tools.
 
 ### `ConditionalConfigSync.ModRequirements.cfg`
 

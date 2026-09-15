@@ -1,3 +1,7 @@
+# 1.0.8
+* added whole-mod hidden policy support: a bare mod GUID in `ConditionalConfigSync.HiddenConfigs.cfg` now hides all settings registered by that mod
+* kept whole-mod identifiers exclusive to hidden policy; `SyncPolicy.cfg` still accepts only section and exact-setting targets
+
 # 1.0.7
 * resent version handshakes immediately before vanilla `PeerInfo`, reducing false `HandshakeMissing` rejections after transient PlayFab or other transport recovery during connection setup
 

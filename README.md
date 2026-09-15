@@ -165,24 +165,27 @@ File:
 BepInEx/config/shudnal.ConditionalConfigSync/ConditionalConfigSync.HiddenConfigs.cfg
 ```
 
-Add either an exact setting identifier or a whole-section identifier per line:
+Add a mod GUID, whole-section identifier, or exact setting identifier per line:
 
 ```ini
-# Exact settings
-author.mod.Advanced.Internal multiplier
-author.mod.Debug.Enable verbose output
+# Every setting registered by a mod
+author.mod
 
 # Every setting in a section
 author.mod.Advanced
+
+# Exact settings
+author.mod.Advanced.Internal multiplier
+author.mod.Debug.Enable verbose output
 ```
 
-An exact or section match marks the setting as not browsable in compatible configuration managers. Hiding is a presentation policy, not a security boundary: the setting still exists, and its synchronization behavior is controlled separately by `SyncPolicy.cfg`, its `ConfigSyncMode`, and the lock state.
+A mod, section, or exact-setting match marks the affected settings as not browsable in compatible configuration managers. Whole-mod identifiers are supported only by `HiddenConfigs.cfg`; `SyncPolicy.cfg` still requires a section or exact-setting target. Hiding is a presentation policy, not a security boundary: the setting still exists, and its synchronization behavior is controlled separately by `SyncPolicy.cfg`, its `ConfigSyncMode`, and the lock state.
 
 Typical uses:
 
 - hide advanced or dangerous options from ordinary configuration UI;
 - simplify a public server's visible settings;
-- hide a whole internal section with one line;
+- hide every setting of a mod or a whole internal section with one line;
 - keep diagnostic options available in the config file without advertising them in the manager.
 
 ### Debug logging
@@ -464,7 +467,7 @@ For Thunderstore, add this package to the mod's dependencies. Do not copy either
 - Adds server-side `SyncPolicy.cfg` overrides for exact settings and complete sections.
 - Adds opt-in `ModRequirementMode.Conditional` admission policy through `ModRequirements.cfg`, preserving fixed `ModRequired` behavior for existing consumers.
 - Allows compatible configuration UIs to request administrator-authorized exact-setting policy toggles while keeping the policy file as the persistent source of truth.
-- Adds exact-setting and section-level `HiddenConfigs.cfg` rules for Configuration Manager visibility.
+- Adds whole-mod, section-level, and exact-setting `HiddenConfigs.cfg` rules for Configuration Manager visibility.
 - Sends effective config state together with server values.
 
 ### Locking and administration

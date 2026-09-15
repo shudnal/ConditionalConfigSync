@@ -405,9 +405,10 @@ public partial class ConditionalConfigSync
         {
             File.WriteAllText(HiddenConfigsPath,
                 "# ConditionalConfigSync hidden config policy. Server-side only.\n" +
-                "# Exact setting: ModGuid.Section.Key\n" +
+                "# Whole mod: ModGuid\n" +
                 "# Whole section: ModGuid.Section\n" +
-                "# Exact and section entries may be combined.\n");
+                "# Exact setting: ModGuid.Section.Key\n" +
+                "# Mod, section, and exact entries may be combined.\n");
         }
 
         if (!File.Exists(ModRequirementsPath))
@@ -796,7 +797,7 @@ public partial class ConditionalConfigSync
                 continue;
             }
 
-            PolicyTargetResolution resolution = ResolvePolicyTarget(record.Key);
+            PolicyTargetResolution resolution = ResolveHiddenPolicyTarget(record.Key);
             if (LogPolicyTargetFailure(resolution, record.DisplayText, "HiddenConfigs", sourceSuffix))
             {
                 continue;
@@ -877,6 +878,23 @@ public partial class ConditionalConfigSync
         return result;
     }
 
+    private static PolicyTargetResolution ResolveHiddenPolicyTarget(string key)
+    {
+        ConditionalConfigSync? wholeMod = configSyncs.FirstOrDefault(
+            sync => string.Equals(sync.Name, key, StringComparison.OrdinalIgnoreCase));
+        if (wholeMod == null)
+        {
+            return ResolvePolicyTarget(key);
+        }
+
+        PolicyTargetResolution result = new()
+        {
+            ConfigSync = wholeMod,
+        };
+        result.Configs.AddRange(wholeMod.allConfigs);
+        return result;
+    }
+
     private static ConditionalConfigSync? ResolveModRequirementTarget(string key)
     {
         return configSyncs.FirstOrDefault(
@@ -926,21 +944,35 @@ public partial class ConditionalConfigSync
         hiddenRuleCount = parsedHidden.Count;
         modRequirementRuleCount = parsedModRequirements.Count;
 
-        HashSet<string> knownKeys = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> knownConfigPolicyKeys = new(StringComparer.OrdinalIgnoreCase);
+        HashSet<string> knownHiddenPolicyKeys = new(StringComparer.OrdinalIgnoreCase);
         foreach (ConditionalConfigSync configSync in configSyncs)
         {
+            knownHiddenPolicyKeys.Add(configSync.Name);
             foreach (OwnConfigEntryBase config in configSync.allConfigs)
             {
-                knownKeys.Add(configSync.GetPolicyKey(config));
-                knownKeys.Add(configSync.GetPolicySectionKey(config));
+                string exactKey = configSync.GetPolicyKey(config);
+                string sectionKey = configSync.GetPolicySectionKey(config);
+                knownConfigPolicyKeys.Add(exactKey);
+                knownConfigPolicyKeys.Add(sectionKey);
+                knownHiddenPolicyKeys.Add(exactKey);
+                knownHiddenPolicyKeys.Add(sectionKey);
             }
         }
 
-        foreach (string key in parsedSync.Keys.Concat(parsedHidden).Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (string key in parsedSync.Keys)
         {
-            if (!knownKeys.Contains(key))
+            if (!knownConfigPolicyKeys.Contains(key))
             {
-                diagnostics.Add($"Unknown identifier: {key}");
+                diagnostics.Add($"Unknown sync policy identifier: {key}");
+            }
+        }
+
+        foreach (string key in parsedHidden)
+        {
+            if (!knownHiddenPolicyKeys.Contains(key))
+            {
+                diagnostics.Add($"Unknown hidden config identifier: {key}");
             }
         }
 
@@ -1135,9 +1167,10 @@ public partial class ConditionalConfigSync
         {
             "# ConditionalConfigSync policy identifiers",
             "# Copy an identifier into SyncPolicy.cfg and prefix it with '+' or '-'.",
-            "# Copy an identifier into HiddenConfigs.cfg without a prefix.",
+            "# Copy a mod GUID, section identifier, or exact setting identifier into HiddenConfigs.cfg without a prefix.",
             "# Copy a mod GUID into ModRequirements.cfg and prefix it with '+' (required) or '-' (optional).",
-            "# To target a whole config section, copy the section identifier shown after '# Section:'.",
+            "# In HiddenConfigs.cfg a bare mod GUID hides all settings registered by that mod.",
+            "# In SyncPolicy.cfg only section and exact-setting identifiers are valid.",
             "",
         };
 
@@ -1344,6 +1377,12 @@ public partial class ConditionalConfigSync
             if (hiddenConfigPolicy.Contains(sectionKey))
             {
                 matchedKey = sectionKey;
+                return true;
+            }
+
+            if (hiddenConfigPolicy.Contains(Name))
+            {
+                matchedKey = Name;
                 return true;
             }
         }
