@@ -145,6 +145,7 @@ public partial class ConditionalConfigSync
             runtimeHarmony = new Harmony(RuntimeGuard.HarmonyId);
             ApplyRuntimePatches(runtimeHarmony);
             VersionCheck.ApplyRuntimePatches(runtimeHarmony);
+            VersionCheck.ApplyPeerInfoHandshakeResendPatch(runtimeHarmony);
 
             assemblyLoadHandler = (_, args) => WarnIfEmbeddedAssembly(args.LoadedAssembly);
             AppDomain.CurrentDomain.AssemblyLoad += assemblyLoadHandler;
