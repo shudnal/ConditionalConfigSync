@@ -1,3 +1,7 @@
+# 1.0.7
+* resent version handshakes immediately before vanilla `PeerInfo`, reducing false `HandshakeMissing` rejections after transient PlayFab or other transport recovery during connection setup
+* simplified release packaging to produce only the Thunderstore package and removed GitHub release staging and checksum generation
+
 # 1.0.6
 * added `ModRequirementMode.Fixed` and `ModRequirementMode.Conditional`; existing consumers remain fixed by default and keep their previous `ModRequired` behavior without recompilation
 * added server-only `ConditionalConfigSync.ModRequirements.cfg` admission policy, where `+ ModGuid` requires a Conditional consumer and `- ModGuid` allows clients without it while preserving the mod author's default when no rule matches
