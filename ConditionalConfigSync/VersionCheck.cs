@@ -885,6 +885,10 @@ public partial class VersionCheck
 
             bool matched = false;
             bool server = GameReflection.IsServer();
+            if (server)
+            {
+                RecordAdvertisedClientConsumer(rpc, guid, state);
+            }
             string remote = FormatRemotePeer(rpc, server ? "client" : "server");
 
             foreach (VersionCheck check in versionChecks)
@@ -939,6 +943,19 @@ public partial class VersionCheck
                 if (!server && !processedByPreviousHandler)
                 {
                     notProcessedNames[guid] = currentVersion;
+                }
+            }
+
+            // Normally every client advertisement arrives before PeerInfo. If an older peer or a transient transport
+            // recovery delivers a valid advertisement after admission, refresh the derived capability view immediately
+            // instead of waiting for another join/leave event.
+            if (server)
+            {
+                ZNet? znet = GameReflection.ZNetInstance;
+                ZNetPeer? peer = znet == null ? null : GameReflection.GetPeer(rpc, znet);
+                if (peer != null && GameReflection.IsPeerReady(peer))
+                {
+                    BroadcastRemoteConsumerSnapshots(znet);
                 }
             }
         }
@@ -1018,10 +1035,19 @@ public partial class VersionCheck
         return false;
     }
 
-    private static void RPC_PeerInfoCompleted(ZNet __instance)
+    private static void RPC_PeerInfoCompleted(ZRpc rpc, ZNet __instance)
     {
-        if (GameReflection.IsServer(__instance)
-            || Equals(GameReflection.GetConnectionStatus(), ZNet.ConnectionStatus.ErrorVersion))
+        if (GameReflection.IsServer(__instance))
+        {
+            ZNetPeer? peer = GameReflection.GetPeer(rpc, __instance);
+            if (peer != null && GameReflection.IsPeerReady(peer))
+            {
+                BroadcastRemoteConsumerSnapshots(__instance);
+            }
+            return;
+        }
+
+        if (Equals(GameReflection.GetConnectionStatus(), ZNet.ConnectionStatus.ErrorVersion))
         {
             return;
         }
@@ -1041,6 +1067,10 @@ public partial class VersionCheck
         ZRpc peerRpc = GameReflection.GetPeerRpc(peer);
         connectionStartedAt[peerRpc] = DateTime.UtcNow.Ticks;
         malformedHandshakeErrors.Remove(peerRpc);
+        if (server)
+        {
+            ResetAdvertisedClientConsumers(peerRpc);
+        }
 
         if (!server)
         {
@@ -1051,10 +1081,12 @@ public partial class VersionCheck
             long connectionGeneration = ++nextClientConnectionGeneration;
             activeClientConnectionGeneration = connectionGeneration;
             expiredClientConnectionGeneration = 0;
+            ClearRemoteConsumerStates();
             GameReflection.RegisterRpcPackage(
                 peerRpc,
                 DisconnectReasonRpcName,
                 (rpc, package) => ReceiveDisconnectReason(rpc, package, connectionGeneration));
+            RegisterRemoteConsumerSnapshotHandler(peerRpc, connectionGeneration);
         }
 
         IDictionary rpcFunctions = GameReflection.GetRpcFunctions(peerRpc);
@@ -1187,6 +1219,8 @@ public partial class VersionCheck
         notProcessedNames.Clear();
         malformedHandshakeErrors.Clear();
         connectionStartedAt.Clear();
+        ClearAdvertisedClientConsumers();
+        ClearRemoteConsumerStates();
         foreach (VersionCheck check in versionChecks)
         {
             check.receivedServerHandshake = null;
@@ -1222,11 +1256,17 @@ public partial class VersionCheck
         ZRpc rpc = GameReflection.GetPeerRpc(peer);
         malformedHandshakeErrors.Remove(rpc);
         connectionStartedAt.Remove(rpc);
+        ResetAdvertisedClientConsumers(rpc);
         foreach (VersionCheck check in versionChecks)
         {
             check.ValidatedClients.Remove(rpc);
             check.receivedClientHandshakes.Remove(rpc);
             check.requiredClients.Remove(rpc);
+        }
+
+        if (GameReflection.IsPeerReady(peer))
+        {
+            BroadcastRemoteConsumerSnapshots(__instance, peer);
         }
     }
 

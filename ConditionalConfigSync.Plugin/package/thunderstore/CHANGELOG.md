@@ -1,3 +1,8 @@
+# 1.0.9
+* added remote consumer capability detection, allowing mods to reliably determine whether a specific mod is present and compatible on the server or another client before sending custom RPCs or using other optional network features
+* added public remote-consumer capability queries by routed peer UID through `RemoteConsumerState`, `GetRemoteConsumerState`, and `HasCompatibleConsumer`
+* reused existing CCS version-handshake validation and added compact server-distributed client capability snapshots without exposing remote versions or adding a second consumer handshake
+
 # 1.0.8
 * added whole-mod hidden policy support: a bare mod GUID in `ConditionalConfigSync.HiddenConfigs.cfg` now hides all settings registered by that mod
 * kept whole-mod identifiers exclusive to hidden policy; `SyncPolicy.cfg` still accepts only section and exact-setting targets

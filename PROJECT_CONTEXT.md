@@ -4,7 +4,7 @@ This document is the durable engineering context for Conditional Config Sync (CC
 
 Read this file before making architectural, networking, compatibility, policy, lifecycle, or packaging changes. Read the current source code as the final authority when implementation details have evolved, and update this document whenever a project decision changes.
 
-## Current handoff snapshot — 2026-09-15
+## Current handoff snapshot — 2026-09-21
 
 This section is the shortest path for starting a new chat or resuming work after context loss. It records the exact accepted baseline, the current unreleased release state, the incident that motivated the latest work, and the non-negotiable implementation decisions. The remainder of this document contains the deeper architecture and historical rationale.
 
@@ -36,18 +36,32 @@ For the 1.0.6 conditional mod-requirement work started on 2026-09-12, the author
 
 For the 1.0.8 whole-mod hidden-policy work started on 2026-09-15, the authoritative baseline is the owner-supplied `ConditionalConfigSync(7).zip`, SHA-256 `13da04ecbae850646b83f3ba01e9c374e44f9becb92581cc73de8c9d0e8a9da2`. It already contains the accepted 1.0.7 PeerInfo handshake resend and Thunderstore-only packaging cleanup.
 
+For the 1.0.9 remote-consumer capability work started on 2026-09-21, the authoritative baseline is the owner-supplied `ConditionalConfigSync(8).zip`, SHA-256 `fad5494bb0e8a707f6d7a98208fccd99a46cab8b10626a18d43985ea4de72d51`. It already contains the accepted 1.0.8 whole-mod hidden-policy support.
+
 ### Current release identity
 
-- Package version: `1.0.8`
+- Package version: `1.0.9`
 - CCS wire protocol: `1`
 - Disconnect-report subformat: `1`
 - Core `AssemblyVersion`: `1.0.0.0`
-- Core and plugin file/informational version: `1.0.8`
+- Core and plugin file/informational version: `1.0.9`
 - BepInEx GUID and Harmony owner: `_shudnal.ConditionalConfigSync`
 - Jotunn Harmony owner used only for patch ordering: `com.jotunn.jotunn`
 - ServerSync Harmony owner used only for patch ordering: `org.bepinex.helpers.ServerSync`
 
 The additional package-version string in the ordinary version handshake is an optional trailing protocol-1 field. It does not justify a CCS protocol bump. The disconnect report is a separate best-effort RPC with its own internal format version and likewise does not change the main protocol.
+
+### 1.0.9 remote consumer capability API
+
+Version 1.0.9 adds the additive public `RemoteConsumerState` enum plus `ConditionalConfigSync.GetRemoteConsumerState(string consumerGuid, long peerUid)` and `ConditionalConfigSync.HasCompatibleConsumer(string consumerGuid, long peerUid)`. The API is global/session-scoped because routed peer identity and version admission are global network state rather than properties of one config entry. Existing public members, protocol `1`, and core `AssemblyVersion` `1.0.0.0` remain unchanged; consumers compiled against older CCS 1.x releases do not need rebuilding. New consumers that call this API must depend on CCS 1.0.9 or newer.
+
+The implementation deliberately reuses the existing `VersionCheck` handshake. It does not add a second consumer handshake and does not use CCS as a payload transport for dependent mods. On the server, polling resolves a routed peer UID back to the admitted `ZNetPeer`/`ZRpc` and reads the existing per-consumer `receivedClientHandshakes` plus `ValidatedClients` state. A received but failed handshake is `Incompatible`; an admitted peer with no handshake is `Missing` only when the consumer's normal client behavior guarantees advertisement (`ModRequired` or `ModRequirementMode.Conditional`). Fixed optional consumers remain `Unknown` when silent because their legacy one-sided handshake intentionally cannot prove absence.
+
+For client-to-client queries, the server sends a compact full capability snapshot through the direct `ConditionalConfigSync RemoteConsumerSnapshot` RPC after successful vanilla `PeerInfo`. The snapshot contains only `(peer UID, consumer GUID, RemoteConsumerState)` entries and has its own internal format version and bounds; it never sends raw versions, config values, or the original handshake package. Each recipient receives states only for consumers that recipient itself advertised. The server compares the recipient and target handshake version ranges directly before returning `Compatible`; when the server also owns that consumer, both peers must additionally be present in the existing `ValidatedClients` set. This means two peers that both satisfy the server but not each other are still reported as `Incompatible`, while unknown-to-server consumers can be compared pairwise without another handshake.
+
+The capability snapshot is intentionally buffered with the existing initial `PeerInfo`/`PlayerList`/`AdminList` traffic so client code cannot observe cross-peer capability data before vanilla peer admission is established. A full snapshot is resent to ready clients when a peer finishes admission and when a ready peer disconnects. A valid advertisement that unusually arrives after admission also triggers a refresh, covering older peers or transport recovery without adding retry semantics to the capability layer. Client cache state is cleared when a new server connection starts, on network reset, and on shutdown. Entries omitted from a later full snapshot become `Unknown`, preventing stale capabilities from leaking between peers or sessions. If a derived snapshot exceeds its safety bounds, the server sends an empty full snapshot so the recipient fails closed to `Unknown` instead of retaining stale capability data.
+
+The server also keeps a private generic index of the same parsed client handshakes, including consumer GUIDs not registered locally. This is not a second handshake: `CheckVersion` records the already received packet once, and the raw metadata remains server-local. If two clients advertise the same unknown-to-server consumer GUID, the server applies the ordinary CCS version/protocol comparison directly between those two handshake states and can publish `Compatible` or `Incompatible` to the recipient. If the target is silent and the server has no local consumer definition proving that installed clients must advertise, the result remains `Unknown`; `HasCompatibleConsumer` therefore fails closed without pretending that silence proves absence. When a matching server-side consumer does exist, its `ValidatedClients` result is additionally required and the server can report `Missing` for Conditional/required consumers whose installed clients are guaranteed to advertise.
 
 ### 1.0.8 whole-mod hidden policy
 
@@ -1037,7 +1051,8 @@ Do not conflate package version, dependent mod version, assembly identity, the m
 - core `AssemblyVersion` provides stable ABI identity;
 - dependent mod version controls that mod's compatibility policy;
 - `ProtocolVersion` controls ordinary CCS network compatibility;
-- `DisconnectReportFormatVersion` versions only the optional player-facing rejection report.
+- `DisconnectReportFormatVersion` versions only the optional player-facing rejection report;
+- `RemoteConsumerSnapshotFormatVersion` versions only the optional server-to-client remote-consumer capability snapshot.
 
 The ordinary version packet remains:
 
@@ -1052,6 +1067,8 @@ string optional CCS package version
 Protocol-1 peers that omit the optional final string are valid and are logged as `not reported`.
 
 `VersionCheck` stores received client handshakes by `ZRpc`, not in process-global current-version fields. Validation and logging must always use the state belonging to the peer currently entering `RPC_PeerInfo`.
+
+Remote-consumer capability queries must continue to derive compatibility from this same state. Server-side queries use the admitted peer's stored handshake and validation result. Client-to-client snapshots are derived per recipient from the same stored handshakes and contain only final capability state. Do not expose `ValidatedClients`, `receivedClientHandshakes`, remote version strings, or raw handshake packages as public API.
 
 The direct disconnect-report RPC is registered during the client's `OnNewConnection` prefix. The handler closure captures the current connection generation. It only records bounded data and never opens UI directly.
 
@@ -1263,6 +1280,21 @@ At minimum, run or reproduce the following before a release that touches synchro
 74. Compare the new public API against the retained 1.x baseline and investigate every removal or signature change.
 75. Test a compatible older CCS client/server format whenever validation or package entry handling changes.
 
+### Remote consumer capabilities
+
+76. On the server, query a ready client with a compatible Conditional consumer: `GetRemoteConsumerState` returns `Compatible` and `HasCompatibleConsumer` returns true.
+77. Query an admitted client that lacks an optional Conditional consumer: the server returns `Missing`; query a disconnected/unknown UID and receive `Unknown`.
+78. Use a fixed optional consumer whose client does not advertise: absence remains `Unknown`, never `Missing`.
+79. Connect two modded clients whose advertised consumer version ranges are mutually compatible: both clients receive `Compatible` for the other's routed UID after `PeerInfo`.
+80. Connect two clients that each pass the server but whose consumer version ranges are not mutually compatible: each recipient receives `Incompatible` for the other rather than inheriting the server's own validation result.
+81. Connect an unmodded/vanilla client alongside a modded client for an optional Conditional consumer: the modded client receives `Missing` for the vanilla peer and sends no optional consumer RPC to it.
+82. Join a new peer and verify existing clients receive a refreshed full capability snapshot; disconnect that peer and verify its cached entries disappear and polling returns `Unknown`.
+83. Reconnect to another server and verify no peer UID/consumer state from the previous session survives.
+84. Connect a 1.0.9 client to an older protocol-1 CCS server: server-consumer polling still uses the normal local handshake where available, while cross-client queries remain `Unknown`; connection compatibility is otherwise unchanged.
+85. Connect an older protocol-1 client to a 1.0.9 server: the unknown capability-snapshot RPC is ignored and normal admission/synchronization remain unchanged.
+86. Run a server without the queried consumer registered: two clients that both advertise the same consumer can still receive `Compatible`/`Incompatible` from pairwise handshake comparison, while a silent target remains `Unknown` and `HasCompatibleConsumer` stays false.
+87. Deliver a valid consumer advertisement after that peer is already ready (simulating an older one-shot sender or unusual transport recovery): ready clients receive a refreshed capability snapshot without requiring a second consumer handshake.
+
 The 1.0.6 requirement-policy feature is additive. API compatibility review must specifically confirm that adding `ModRequirementMode` and the new property did not change the metadata identity or signatures of existing members. The unchanged old-consumer test must cover both fixed-required and fixed-optional consumers. Protocol-1 interoperability must be checked because Conditional consumers send the same existing version packet in an additional previously-optional case.
 
 ## Compatibility verification requirement
@@ -1320,6 +1352,9 @@ A dependent mod should declare the minimum CCS package version that provides the
 - `RuntimeGuard.cs`: standalone assembly enforcement and Harmony identity.
 - `VersionCheck.cs`: peer admission, per-peer version/protocol diagnostics, structured disconnect reports, pending client-reason lifecycle, Jotunn/ServerSync-aware error-text injection, and vanilla-panel layout normalization.
 - `VersionCheck.PeerInfoResend.cs`: idempotent version-handshake resend immediately before vanilla `PeerInfo`.
+- `VersionCheck.RemoteConsumers.cs`: server-side capability evaluation, compact per-recipient capability snapshots, client capability cache, and lifecycle cleanup.
+- `RemoteConsumerState.cs`: public remote-consumer capability state contract.
+- `ConditionalConfigSync.RemoteConsumers.cs`: public polling API by routed peer UID.
 - `SynchronizationEvents.cs`: public lifecycle/policy/rejection event arguments.
 - `PluginInfoCCS.cs`: canonical package, plugin, repository, and protocol metadata.
 - `PluginSelfInfo.cs`: retained compatibility metadata alias; do not remove while existing consumers may reference it.

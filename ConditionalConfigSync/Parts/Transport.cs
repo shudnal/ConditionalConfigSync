@@ -1256,7 +1256,8 @@ public partial class ConditionalConfigSync
                        || methodHash == GameReflection.StableHash("HistoricalPlayerList")
                        || methodHash == GameReflection.StableHash("AdminList")
                        || methodHash == GameReflection.StableHash("RoutedRPC")
-                       || methodHash == GameReflection.StableHash("ZDOData");
+                       || methodHash == GameReflection.StableHash("ZDOData")
+                       || methodHash == GameReflection.StableHash(VersionCheck.RemoteConsumerSnapshotRpcName);
             }
 
             public new void Send(ZPackage pkg)

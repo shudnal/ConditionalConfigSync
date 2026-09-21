@@ -47,6 +47,7 @@ internal static class GameReflection
     private static readonly FieldInfo ZRoutedRpcEverybodyField = RequiredField(ZRoutedRpcType, "Everybody");
     private static readonly FieldInfo ZRoutedRpcPeersField = RequiredField(ZRoutedRpcType, "m_peers");
     private static readonly MethodInfo ZRoutedRpcGetPeerMethod = RequiredMethod(ZRoutedRpcType, "GetPeer", typeof(long));
+    private static readonly MethodInfo ZRoutedRpcGetServerPeerIdMethod = RequiredMethod(ZRoutedRpcType, "GetServerPeerID", Type.EmptyTypes);
     private static readonly MethodInfo ZRoutedRpcInvokePackageMethod = RequiredMethod(ZRoutedRpcType, "InvokeRoutedRPC", typeof(string), typeof(object[]));
     private static readonly MethodInfo ZRoutedRpcRegisterPackageMethod = ZRoutedRpcType.GetMethods(Any)
         .Single(m => m.Name == "Register" && m.IsGenericMethodDefinition && m.GetGenericArguments().Length == 1 && m.GetParameters().Length == 2)
@@ -164,6 +165,11 @@ internal static class GameReflection
     internal static long Everybody => Convert.ToInt64(ZRoutedRpcEverybodyField.GetValue(null));
     internal static bool HasZNet => ZNetInstance != null;
     internal static bool HasZRoutedRpc => ZRoutedRpcInstance != null;
+    internal static long GetServerRoutedUid()
+    {
+        ZRoutedRpc? rpc = ZRoutedRpcInstance;
+        return rpc == null ? 0L : Convert.ToInt64(Invoke(ZRoutedRpcGetServerPeerIdMethod, rpc));
+    }
 
     internal static bool IsServer(ZNet? znet = null)
     {

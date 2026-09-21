@@ -326,6 +326,28 @@ When a client-side optional instance receives no matching server handshake and t
 
 When the remote copy exists, `CurrentVersion`, `MinimumRequiredVersion`, and the CCS wire protocol are used for compatibility checks. Late registration or `RequestFullSync()` does not repeat connection admission, so configure both `ModRequired` and `ModRequirementMode` while creating the `ConfigSync` instance.
 
+### Querying a remote consumer
+
+CCS 1.0.9 exposes a stable capability query for optional peer-to-peer features that should only target peers running a compatible copy of a consumer mod:
+
+```csharp
+RemoteConsumerState state = ConditionalConfigSync.GetRemoteConsumerState(pluginID, peerUid);
+bool supported = ConditionalConfigSync.HasCompatibleConsumer(pluginID, peerUid);
+```
+
+`peerUid` is the Valheim routed peer UID (`ZNetPeer.m_uid`), which is also the sender/target identifier used by `ZRoutedRpc`. The returned state is:
+
+- `Unknown` - CCS cannot currently determine the capability, for example before peer admission, after disconnect, when a server-side query has no local consumer/version check to compare against, when an unregistered consumer is silent on another client, or when an older server does not publish cross-client capability state;
+- `Missing` - admission completed and the peer did not advertise a consumer whose installed copies are expected to advertise during the CCS version handshake;
+- `Incompatible` - the peer advertised the consumer but its normal CCS version/protocol compatibility check did not pass for this relationship;
+- `Compatible` - the consumer was advertised and passed the applicable CCS version/protocol compatibility check.
+
+The server answers its own queries directly from the existing `VersionCheck` handshake state. For client-to-client queries, the server derives a compact per-recipient snapshot after `PeerInfo` and sends only `peer UID + consumer GUID + state`; raw consumer versions, config data, and handshake payloads are not exposed. A client receives entries only for consumer GUIDs that it advertised itself, so this API is a compatibility query for locally participating consumers rather than a remote mod-list enumeration mechanism. This is capability propagation, not a second consumer handshake, and CCS does not transport application payloads for the consumer mod.
+
+For client-to-client discovery, the server reuses every parsed CCS consumer handshake it receives. If both peers advertise the same consumer GUID, their advertised version ranges and CCS protocol are compared directly, so this also works when that consumer is not installed on the server. When the server does have the consumer registered, its ordinary validation result is enforced as an additional requirement and a missing handshake can be reported as `Missing` when that consumer is known to advertise whenever installed. Without a matching server-side consumer, a silent target remains `Unknown` rather than being guessed as absent; `HasCompatibleConsumer` is false for both `Unknown` and `Missing`. Fixed optional consumers intentionally do not advertise from clients and therefore cannot provide cross-client capability discovery through this API. Capability state is refreshed when peers join or leave and is cleared on shutdown/reconnect.
+
+A mod that calls these APIs must declare Conditional Config Sync 1.0.9 or newer as its minimum dependency. Older CCS peers remain protocol-compatible; they simply do not provide cross-client capability snapshots.
+
 Register an existing BepInEx entry with its mode in one call:
 
 ```csharp
