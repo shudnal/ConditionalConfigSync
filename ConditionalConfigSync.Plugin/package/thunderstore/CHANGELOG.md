@@ -1,4 +1,5 @@
 # 1.0.9
+* improved detection of concurrently activated ConditionalConfigSync copies and prevented false-positive duplicate warnings during AzuAntiCheat plugin scans
 * added remote consumer capability detection, allowing mods to reliably determine whether a specific mod is present and compatible on the server or another client before sending custom RPCs or using other optional network features
 * added public remote-consumer capability queries by routed peer UID through `RemoteConsumerState`, `GetRemoteConsumerState`, and `HasCompatibleConsumer`
 * reused existing CCS version-handshake validation and added compact server-distributed client capability snapshots without exposing remote versions or adding a second consumer handshake
