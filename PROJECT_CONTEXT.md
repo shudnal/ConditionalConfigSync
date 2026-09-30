@@ -639,9 +639,11 @@ The stable `AssemblyVersion` is an explicit compatibility requirement for the 1.
 
 ### Why embedding is rejected
 
-An embedded copy would recreate the exact fragmentation that the shared runtime is intended to eliminate. CCS therefore detects another assembly containing the CCS public types and reports an error. Runtime Harmony patches are installed explicitly under the CCS Harmony owner rather than through broad `PatchAll` discovery, which also reduces the chance that a private copy can accidentally activate duplicate patches.
+An embedded copy would recreate the exact fragmentation that the shared runtime is intended to eliminate. Runtime Harmony patches are installed explicitly under the CCS Harmony owner rather than through broad `PatchAll` discovery, which also reduces the chance that a private copy can accidentally activate duplicate patches.
 
-Do not weaken the embedding guard merely to make an incorrectly packaged dependent mod load. The correct repair is to remove the embedded assembly and declare the standalone hard dependency.
+Passive assembly loading is not itself treated as activation. Tools may use `Assembly.LoadFile` to inspect plugin metadata or calculate package hashes without ever allowing BepInEx to instantiate the copied plugin. CCS therefore rejects a duplicate only when that copy is actually used: an embedded core still fails its normal runtime guard, a second same-named core cannot claim the AppDomain-wide active-runtime slot, and a second bootstrap `Awake` cannot claim the AppDomain-wide bootstrap slot. A bootstrap that does not own that slot must not call `ShutdownRuntime` from `OnDestroy`.
+
+Do not weaken these activation guards merely to make an incorrectly packaged dependent mod run. The correct repair for an actively used embedded or duplicate copy is to remove it and declare the standalone hard dependency.
 
 ## Public API compatibility model
 
