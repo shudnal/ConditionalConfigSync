@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.Reflection;
 using BepInEx;
 
 namespace ConditionalConfigSync;
@@ -27,6 +28,9 @@ public sealed class ConditionalConfigSyncPlugin : BaseUnityPlugin
 
     private const string PluginAssemblyName = "ConditionalConfigSync.Plugin";
     private const string CoreAssemblyName = "ConditionalConfigSync";
+    private const string ActiveBootstrapKey = "_shudnal.ConditionalConfigSync.ActiveBootstrapInstance";
+
+    private bool ownsBootstrap;
 
     private void Awake()
     {
@@ -50,11 +54,93 @@ public sealed class ConditionalConfigSyncPlugin : BaseUnityPlugin
             return;
         }
 
-        global::ConditionalConfigSync.ConditionalConfigSync.InitializeRuntime();
+        if (!TryClaimBootstrap())
+        {
+            enabled = false;
+            return;
+        }
+
+        try
+        {
+            global::ConditionalConfigSync.ConditionalConfigSync.InitializeRuntime();
+        }
+        catch
+        {
+            ReleaseBootstrap();
+            enabled = false;
+            throw;
+        }
+    }
+
+    private bool TryClaimBootstrap()
+    {
+        AppDomain domain = AppDomain.CurrentDomain;
+        lock (domain)
+        {
+            object? active = domain.GetData(ActiveBootstrapKey);
+            if (active != null && !ReferenceEquals(active, this))
+            {
+                Assembly activeAssembly = active.GetType().Assembly;
+                Assembly attemptedAssembly = typeof(ConditionalConfigSyncPlugin).Assembly;
+                Logger.LogFatal(
+                    "A second ConditionalConfigSync bootstrap attempted to initialize while another bootstrap is already active. " +
+                    $"Active bootstrap: {DescribeAssembly(activeAssembly)}. Attempted bootstrap: {DescribeAssembly(attemptedAssembly)}.");
+                return false;
+            }
+
+            domain.SetData(ActiveBootstrapKey, this);
+            ownsBootstrap = true;
+            return true;
+        }
+    }
+
+    private static string DescribeAssembly(Assembly assembly)
+    {
+        string location;
+        try
+        {
+            location = assembly.IsDynamic ? "<dynamic>" : assembly.Location;
+        }
+        catch
+        {
+            location = "<unknown location>";
+        }
+
+        return $"'{assembly.FullName}' at '{location}'";
+    }
+
+    private void ReleaseBootstrap()
+    {
+        if (!ownsBootstrap)
+        {
+            return;
+        }
+
+        AppDomain domain = AppDomain.CurrentDomain;
+        lock (domain)
+        {
+            if (ReferenceEquals(domain.GetData(ActiveBootstrapKey), this))
+            {
+                domain.SetData(ActiveBootstrapKey, null);
+            }
+        }
+        ownsBootstrap = false;
     }
 
     private void OnDestroy()
     {
-        global::ConditionalConfigSync.ConditionalConfigSync.ShutdownRuntime();
+        if (!ownsBootstrap)
+        {
+            return;
+        }
+
+        try
+        {
+            global::ConditionalConfigSync.ConditionalConfigSync.ShutdownRuntime();
+        }
+        finally
+        {
+            ReleaseBootstrap();
+        }
     }
 }
