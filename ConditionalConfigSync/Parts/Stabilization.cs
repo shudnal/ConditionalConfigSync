@@ -122,7 +122,6 @@ public partial class ConditionalConfigSync
 
     private static bool sessionActive;
     private static Harmony? runtimeHarmony;
-    private static AssemblyLoadEventHandler? assemblyLoadHandler;
 
     /// <summary>
     /// Requests a complete synchronization package from the currently connected server.
@@ -859,12 +858,6 @@ public partial class ConditionalConfigSync
             ResetNetworkSessionState();
             StopDebugSupport();
 
-            if (assemblyLoadHandler != null)
-            {
-                AppDomain.CurrentDomain.AssemblyLoad -= assemblyLoadHandler;
-                assemblyLoadHandler = null;
-            }
-
             try
             {
                 if (runtimeHarmony != null)
@@ -889,6 +882,7 @@ public partial class ConditionalConfigSync
             VersionCheck.ShutdownRuntime();
             configSyncs.Clear();
             runtimeInitialized = false;
+            RuntimeGuard.ReleaseActiveRuntime();
             mainThreadId = 0;
             isServer = false;
             lockExempt = false;
