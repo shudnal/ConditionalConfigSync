@@ -142,19 +142,20 @@ public partial class ConditionalConfigSync
                 throw;
             }
 
-            runtimeHarmony = new Harmony(RuntimeGuard.HarmonyId);
-            ApplyRuntimePatches(runtimeHarmony);
-            VersionCheck.ApplyRuntimePatches(runtimeHarmony);
-            VersionCheck.ApplyPeerInfoHandshakeResendPatch(runtimeHarmony);
-
-            assemblyLoadHandler = (_, args) => WarnIfEmbeddedAssembly(args.LoadedAssembly);
-            AppDomain.CurrentDomain.AssemblyLoad += assemblyLoadHandler;
-            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            RuntimeGuard.ClaimActiveRuntime();
+            try
             {
-                WarnIfEmbeddedAssembly(assembly);
+                runtimeHarmony = new Harmony(RuntimeGuard.HarmonyId);
+                ApplyRuntimePatches(runtimeHarmony);
+                VersionCheck.ApplyRuntimePatches(runtimeHarmony);
+                VersionCheck.ApplyPeerInfoHandshakeResendPatch(runtimeHarmony);
+                runtimeInitialized = true;
             }
-
-            runtimeInitialized = true;
+            catch
+            {
+                RuntimeGuard.ReleaseActiveRuntime();
+                throw;
+            }
         }
     }
 
@@ -213,28 +214,10 @@ public partial class ConditionalConfigSync
         return new HarmonyMethod(method);
     }
 
-    private static void WarnIfEmbeddedAssembly(Assembly assembly)
-    {
-        if (assembly == typeof(ConditionalConfigSync).Assembly)
-        {
-            return;
-        }
-
-        if (assembly.GetType("ConditionalConfigSync.ConditionalConfigSync", throwOnError: false) == null
-            && assembly.GetType("ConditionalConfigSync.ConfigSync", throwOnError: false) == null)
-        {
-            return;
-        }
-
-        LogSource.LogError(
-            $"Embedded ConditionalConfigSync copy detected in assembly '{assembly.GetName().Name}'. " +
-            "Embedded copies are unsupported and will reject ConfigSync creation. " +
-            "Reference ConditionalConfigSync.dll and declare the BepInEx hard dependency '_shudnal.ConditionalConfigSync'.");
-    }
-
     internal static void EnsureRuntimeReady()
     {
         RuntimeGuard.ThrowIfEmbedded();
+        RuntimeGuard.ThrowIfDifferentActiveRuntime();
         if (!runtimeInitialized)
         {
             throw new InvalidOperationException(
