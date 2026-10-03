@@ -1,5 +1,7 @@
 # Conditional Config Sync
 
+> **[*Conditional* Conditional Config Sync](https://github.com/shudnal/ConditionalConfigSync/blob/master/docs/conditional-conditional-config-sync.md)** — embed the optional CCS adapter directly into your mod project (as a source file or via ILRepack) and automatically add config synchronization when **CCS 1.0.10 or newer** is installed in the current modpack; without CCS, or with CCS 1.0.5-1.0.9, the same settings remain ordinary local BepInEx config entries.
+
 Conditional Config Sync is a shared infrastructure library for Valheim mods. It does not add gameplay content, items, UI, or configuration options of its own. Install it when another mod lists it as a dependency.
 
 The package provides centralized config synchronization, version checks, server-side ownership and admission policy overrides, protected locking, and synchronized runtime values. Keeping this logic in one standalone dependency means fixes can be shipped by updating this package instead of rebuilding every mod that uses it.
@@ -255,7 +257,7 @@ Reference only:
 ConditionalConfigSync.dll
 ```
 
-Then declare the standalone BepInEx plugin as a hard dependency:
+For direct compile-time API use, declare the standalone BepInEx plugin as a hard dependency:
 
 ```csharp
 [BepInDependency(
@@ -280,6 +282,65 @@ internal static readonly ConfigSync configSync = new ConfigSync(pluginID)
     ModRequired = true
 };
 ```
+
+### Optional soft dependency integration
+
+Mods that remain fully functional without synchronized configuration may use the official source/ILRepack adapter instead of referencing `ConditionalConfigSync.dll`.
+
+The adapter is maintained in:
+
+```text
+ConditionalConfigSync.API/ConditionalConfigSyncAPI.cs
+```
+
+You can either copy that source file directly into the mod project or reference `ConditionalConfigSync.API.dll` during development and ILRepack/internalize it into the final mod DLL. Do not distribute `ConditionalConfigSync.API.dll` as a separate runtime dependency.
+
+Declare CCS as a soft BepInEx dependency so it is ordered before the consumer when installed while the consumer still loads without CCS:
+
+```csharp
+// Optional synchronization requires CCS 1.0.10 or newer.
+[BepInDependency(
+    ConditionalConfigSyncAPI.ConfigSync.PluginGuid,
+    BepInDependency.DependencyFlags.SoftDependency)]
+```
+
+The minimum CCS version for this optional integration is **1.0.10**. BepInEx 5 cannot encode a minimum version and keep the dependency soft: its versioned `BepInDependency` constructor is always a hard dependency. The embedded adapter therefore checks `ConditionalConfigSyncAPI.ConfigSync.MinimumCcsVersion` at runtime.
+
+The adapter always returns ordinary BepInEx `ConfigEntry<T>` objects:
+
+- CCS absent: local BepInEx configuration only;
+- CCS 1.0.5-1.0.9: local BepInEx configuration only; the optional bridge is intentionally not activated;
+- CCS 1.0.10 or newer: the same entries are registered with CCS through the official reflection bridge.
+
+```csharp
+var optionalSync = new ConditionalConfigSyncAPI.ConfigSync(
+    pluginID,
+    pluginName,
+    pluginVersion,
+    minimumRequiredVersion: minimumCompatibleVersion,
+    modRequired: false,
+    logger: Logger);
+
+ConfigEntry<bool> useDurability = optionalSync.Bind(
+    Config,
+    "Gameplay",
+    "Use durability",
+    true,
+    "Enable durability.",
+    ConditionalConfigSyncAPI.SyncMode.AlwaysServerControlled);
+
+ConfigEntry<KeyboardShortcut> snappingKey = optionalSync.Bind(
+    Config,
+    "Controls",
+    "Snapping key",
+    new KeyboardShortcut(KeyCode.LeftShift),
+    "Local snapping key.",
+    ConditionalConfigSyncAPI.SyncMode.AlwaysClientControlled);
+```
+
+The helper resolves the bridge through the active BepInEx plugin instance for `_shudnal.ConditionalConfigSync`; it does not scan `AppDomain` assemblies by name. Passive copies loaded by metadata scanners therefore cannot be selected accidentally.
+
+This mode is appropriate only when local unsynchronized fallback is a valid operating mode. If the mod requires synchronized settings for correct gameplay or network behavior, use the normal hard dependency instead.
 
 ### Requiring the mod on the remote side
 

@@ -40,16 +40,30 @@ For the 1.0.9 remote-consumer capability work started on 2026-09-21, the authori
 
 ### Current release identity
 
-- Package version: `1.0.9`
+- Package version: `1.0.10`
 - CCS wire protocol: `1`
 - Disconnect-report subformat: `1`
 - Core `AssemblyVersion`: `1.0.0.0`
-- Core and plugin file/informational version: `1.0.9`
+- Core and plugin file/informational version: `1.0.10`
 - BepInEx GUID and Harmony owner: `_shudnal.ConditionalConfigSync`
 - Jotunn Harmony owner used only for patch ordering: `com.jotunn.jotunn`
 - ServerSync Harmony owner used only for patch ordering: `org.bepinex.helpers.ServerSync`
 
 The additional package-version string in the ordinary version handshake is an optional trailing protocol-1 field. It does not justify a CCS protocol bump. The disconnect report is a separate best-effort RPC with its own internal format version and likewise does not change the main protocol.
+
+### 1.0.10 optional soft-dependency integration
+
+Version 1.0.10 adds the official *Conditional* Conditional Config Sync integration path for mods that remain fully functional without CCS but should automatically gain synchronization when CCS is installed locally.
+
+The consumer-facing `ConditionalConfigSync.API` adapter has no compile-time reference to either CCS runtime assembly. Authors may copy `ConditionalConfigSyncAPI.cs` directly into their project or build/reference `ConditionalConfigSync.API.dll` and ILRepack/internalize it into the final mod DLL. The API DLL is a developer artifact and must not become another separately distributed runtime dependency.
+
+Consumers declare `_shudnal.ConditionalConfigSync` as a BepInEx soft dependency for load ordering. Full optional integration requires CCS 1.0.10 or newer. BepInEx 5 cannot combine a minimum version with `SoftDependency`: its versioned `BepInDependency` constructor is always hard, so the embedded adapter enforces `MinimumCcsVersion = 1.0.10` at runtime. CCS 1.0.5-1.0.9 are treated like CCS being absent and remain local-only without attempting bridge activation. The adapter always returns ordinary BepInEx `ConfigEntry<T>` values. When CCS 1.0.10+ exposes bridge API version 1 and the shared runtime is ready, those same entries are registered with CCS; otherwise they remain ordinary local BepInEx settings. This optional mode is valid only when unsynchronized local fallback is acceptable for the mod.
+
+Discovery is anchored to `Chainloader.PluginInfos[_shudnal.ConditionalConfigSync].Instance` and reflects `ConditionalConfigSync.SoftDependencyBridge` from that instantiated bootstrap assembly. The adapter never scans AppDomain assemblies by name, so passive same-named CCS copies loaded by metadata scanners such as AzuAntiCheat cannot become accidental integration targets.
+
+The reflection bridge deliberately exposes only primitive/string/BepInEx contracts: bridge API version, runtime readiness, consumer creation, config registration, and locking-entry registration. CCS enum values cross the bridge by stable names rather than numeric layout. Direct compile-time consumers of `ConditionalConfigSync.dll` continue to require the normal hard BepInEx dependency.
+
+This release does not change CCS protocol `1` or the stable core `AssemblyVersion = 1.0.0.0`.
 
 ### 1.0.9 remote consumer capability API
 
@@ -636,6 +650,27 @@ AssemblyInformationalVersion = current package version
 ```
 
 The stable `AssemblyVersion` is an explicit compatibility requirement for the 1.x line. It reduces the chance that an old dependent DLL compiled against an earlier CCS file version will fail assembly resolution when a compatible replacement is installed. The plugin assembly may continue to use the current package version as its assembly version because dependent mods do not reference it.
+
+### Optional source/ILRepack adapter
+
+CCS also provides an official optional-integration layer for mods that remain fully functional without synchronized configuration.
+
+`ConditionalConfigSync.API` is a developer-only adapter project. Its single consumer-facing source file has no compile-time reference to either CCS assembly and may be copied directly into a mod project. The project may alternatively be built as `ConditionalConfigSync.API.dll` and ILRepacked/internalized into the consumer mod. The API DLL must not become another separately distributed runtime dependency.
+
+The consumer declares `_shudnal.ConditionalConfigSync` as a BepInEx soft dependency for ordering. The adapter always creates ordinary BepInEx `ConfigEntry<T>` instances. When the active CCS bootstrap exposes the supported bridge and the shared runtime is ready, those same entries are registered with CCS. When CCS is absent or the bridge is unavailable, they remain local BepInEx settings.
+
+The source adapter never finds CCS by scanning `AppDomain.GetAssemblies()` for an assembly name. It resolves the BepInEx `PluginInfo` for `_shudnal.ConditionalConfigSync`, obtains the actual instantiated bootstrap assembly, and reflects only `ConditionalConfigSync.SoftDependencyBridge` from that assembly. This prevents passive same-named assemblies loaded by tools such as AzuAntiCheat from becoming accidental integration targets.
+
+The bridge is intentionally narrow and reflection-stable:
+
+- bridge discovery/version and runtime-ready state;
+- create one consumer context from primitive/string metadata;
+- register an existing `ConfigEntryBase` by a named synchronization mode;
+- register an existing `ConfigEntryBase` as the protected locking entry.
+
+Bridge arguments do not expose CCS types. Enum values cross the bridge by stable names instead of numeric values. Internal CCS fields, properties, constructors, generic overload discovery, and runtime ownership guards remain implementation details on the CCS side.
+
+Direct consumers of `ConditionalConfigSync.dll` continue to require the normal hard BepInEx dependency. The optional adapter is appropriate only when unsynchronized fallback is a valid operating mode. It must not be used to make a synchronization-critical gameplay mod silently operate with divergent client-local values.
 
 ### Why embedding is rejected
 
