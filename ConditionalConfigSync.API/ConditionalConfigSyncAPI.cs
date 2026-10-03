@@ -18,8 +18,13 @@ namespace ConditionalConfigSyncAPI
     /// </summary>
     public enum SyncMode
     {
+        /// <summary>The server always owns and synchronizes the setting when CCS is active.</summary>
         AlwaysServerControlled,
+
+        /// <summary>CCS policy may choose server or client ownership when CCS is active.</summary>
         Conditional,
+
+        /// <summary>Each client always owns the setting; CCS never synchronizes it from the server.</summary>
         AlwaysClientControlled,
     }
 
@@ -28,7 +33,10 @@ namespace ConditionalConfigSyncAPI
     /// </summary>
     public enum RequirementMode
     {
+        /// <summary>The author-defined mod requirement cannot be overridden by server policy.</summary>
         Fixed,
+
+        /// <summary>Server policy may override the author-defined requirement for incoming clients.</summary>
         Conditional,
     }
 
@@ -42,6 +50,7 @@ namespace ConditionalConfigSyncAPI
     /// </remarks>
     public sealed class ConfigSync
     {
+        /// <summary>BepInEx plugin GUID used for the optional CCS soft dependency.</summary>
         public const string PluginGuid = "_shudnal.ConditionalConfigSync";
 
         private const string BridgeTypeName = "ConditionalConfigSync.SoftDependencyBridge";
