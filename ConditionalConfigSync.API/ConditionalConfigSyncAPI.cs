@@ -53,6 +53,11 @@ namespace ConditionalConfigSyncAPI
         /// <summary>BepInEx plugin GUID used for the optional CCS soft dependency.</summary>
         public const string PluginGuid = "_shudnal.ConditionalConfigSync";
 
+        /// <summary>Minimum CCS package version that exposes the supported optional integration bridge.</summary>
+        public const string MinimumCcsVersion = "1.0.10";
+
+        private static readonly Version MinimumSupportedCcsVersion = new Version(MinimumCcsVersion);
+
         private const string BridgeTypeName = "ConditionalConfigSync.SoftDependencyBridge";
         private const int MinimumBridgeApiVersion = 1;
 
@@ -332,6 +337,16 @@ namespace ConditionalConfigSyncAPI
                 if (!Chainloader.PluginInfos.TryGetValue(PluginGuid, out var pluginInfo)
                     || pluginInfo == null
                     || pluginInfo.Instance == null)
+                {
+                    return false;
+                }
+
+                // BepInEx 5 cannot express a minimum version while keeping a dependency soft:
+                // the versioned BepInDependency constructor is always a hard dependency.
+                // Treat older CCS installs exactly like CCS being absent so the owning mod keeps local config behavior.
+                if (pluginInfo.Metadata == null
+                    || pluginInfo.Metadata.Version == null
+                    || pluginInfo.Metadata.Version < MinimumSupportedCcsVersion)
                 {
                     return false;
                 }
