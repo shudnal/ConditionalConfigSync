@@ -1,6 +1,6 @@
 # Conditional Config Sync
 
-> **[*Conditional* Conditional Config Sync](https://github.com/shudnal/ConditionalConfigSync/blob/master/docs/conditional-conditional-config-sync.md)** — embed the optional CCS adapter directly into your mod project (as a source file or via ILRepack) and automatically add config synchronization only when CCS is installed in the current modpack; otherwise the same settings remain ordinary BepInEx config entries.
+> **[*Conditional* Conditional Config Sync](https://github.com/shudnal/ConditionalConfigSync/blob/master/docs/conditional-conditional-config-sync.md)** — embed the optional CCS adapter directly into your mod project (as a source file or via ILRepack) and automatically add config synchronization when **CCS 1.0.10 or newer** is installed in the current modpack; without CCS, or with CCS 1.0.5-1.0.9, the same settings remain ordinary local BepInEx config entries.
 
 Conditional Config Sync is a shared infrastructure library for Valheim mods. It does not add gameplay content, items, UI, or configuration options of its own. Install it when another mod lists it as a dependency.
 
@@ -298,12 +298,19 @@ You can either copy that source file directly into the mod project or reference 
 Declare CCS as a soft BepInEx dependency so it is ordered before the consumer when installed while the consumer still loads without CCS:
 
 ```csharp
+// Optional synchronization requires CCS 1.0.10 or newer.
 [BepInDependency(
     ConditionalConfigSyncAPI.ConfigSync.PluginGuid,
     BepInDependency.DependencyFlags.SoftDependency)]
 ```
 
-The adapter always returns ordinary BepInEx `ConfigEntry<T>` objects. When a compatible CCS runtime is active, those same entries are registered with CCS through the official reflection bridge; when CCS is absent or the bridge is unavailable, they remain ordinary local BepInEx settings.
+The minimum CCS version for this optional integration is **1.0.10**. BepInEx 5 cannot encode a minimum version and keep the dependency soft: its versioned `BepInDependency` constructor is always a hard dependency. The embedded adapter therefore checks `ConditionalConfigSyncAPI.ConfigSync.MinimumCcsVersion` at runtime.
+
+The adapter always returns ordinary BepInEx `ConfigEntry<T>` objects:
+
+- CCS absent: local BepInEx configuration only;
+- CCS 1.0.5-1.0.9: local BepInEx configuration only; the optional bridge is intentionally not activated;
+- CCS 1.0.10 or newer: the same entries are registered with CCS through the official reflection bridge.
 
 ```csharp
 var optionalSync = new ConditionalConfigSyncAPI.ConfigSync(
