@@ -1,5 +1,7 @@
 # Conditional Config Sync
 
+> **[*Conditional* Conditional Config Sync](https://github.com/shudnal/ConditionalConfigSync/blob/master/docs/conditional-conditional-config-sync.md)** — embed the optional CCS adapter directly into your mod project (as a source file or via ILRepack) and automatically add config synchronization only when CCS is installed in the current modpack; otherwise the same settings remain ordinary BepInEx config entries.
+
 Conditional Config Sync is a shared infrastructure library for Valheim mods. It does not add gameplay content, items, UI, or configuration options of its own. Install it when another mod lists it as a dependency.
 
 The package provides centralized config synchronization, version checks, server-side ownership and admission policy overrides, protected locking, and synchronized runtime values. Keeping this logic in one standalone dependency means fixes can be shipped by updating this package instead of rebuilding every mod that uses it.
