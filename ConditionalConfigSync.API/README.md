@@ -39,6 +39,7 @@ Discovery never scans `AppDomain` for an assembly named `ConditionalConfigSync`.
 using BepInEx;
 using BepInEx.Configuration;
 using ConditionalConfigSyncAPI;
+using UnityEngine;
 
 [BepInPlugin(PluginID, PluginName, PluginVersion)]
 [BepInDependency(
