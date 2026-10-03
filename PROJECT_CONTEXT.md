@@ -637,6 +637,27 @@ AssemblyInformationalVersion = current package version
 
 The stable `AssemblyVersion` is an explicit compatibility requirement for the 1.x line. It reduces the chance that an old dependent DLL compiled against an earlier CCS file version will fail assembly resolution when a compatible replacement is installed. The plugin assembly may continue to use the current package version as its assembly version because dependent mods do not reference it.
 
+### Optional source/ILRepack adapter
+
+CCS also provides an official optional-integration layer for mods that remain fully functional without synchronized configuration.
+
+`ConditionalConfigSync.API` is a developer-only adapter project. Its single consumer-facing source file has no compile-time reference to either CCS assembly and may be copied directly into a mod project. The project may alternatively be built as `ConditionalConfigSync.API.dll` and ILRepacked/internalized into the consumer mod. The API DLL must not become another separately distributed runtime dependency.
+
+The consumer declares `_shudnal.ConditionalConfigSync` as a BepInEx soft dependency for ordering. The adapter always creates ordinary BepInEx `ConfigEntry<T>` instances. When the active CCS bootstrap exposes the supported bridge and the shared runtime is ready, those same entries are registered with CCS. When CCS is absent or the bridge is unavailable, they remain local BepInEx settings.
+
+The source adapter never finds CCS by scanning `AppDomain.GetAssemblies()` for an assembly name. It resolves the BepInEx `PluginInfo` for `_shudnal.ConditionalConfigSync`, obtains the actual instantiated bootstrap assembly, and reflects only `ConditionalConfigSync.SoftDependencyBridge` from that assembly. This prevents passive same-named assemblies loaded by tools such as AzuAntiCheat from becoming accidental integration targets.
+
+The bridge is intentionally narrow and reflection-stable:
+
+- bridge discovery/version and runtime-ready state;
+- create one consumer context from primitive/string metadata;
+- register an existing `ConfigEntryBase` by a named synchronization mode;
+- register an existing `ConfigEntryBase` as the protected locking entry.
+
+Bridge arguments do not expose CCS types. Enum values cross the bridge by stable names instead of numeric values. Internal CCS fields, properties, constructors, generic overload discovery, and runtime ownership guards remain implementation details on the CCS side.
+
+Direct consumers of `ConditionalConfigSync.dll` continue to require the normal hard BepInEx dependency. The optional adapter is appropriate only when unsynchronized fallback is a valid operating mode. It must not be used to make a synchronization-critical gameplay mod silently operate with divergent client-local values.
+
 ### Why embedding is rejected
 
 An embedded copy would recreate the exact fragmentation that the shared runtime is intended to eliminate. Runtime Harmony patches are installed explicitly under the CCS Harmony owner rather than through broad `PatchAll` discovery, which also reduces the chance that a private copy can accidentally activate duplicate patches.
