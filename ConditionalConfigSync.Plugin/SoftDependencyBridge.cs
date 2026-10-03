@@ -17,7 +17,7 @@ namespace ConditionalConfigSync;
 public static class SoftDependencyBridge
 {
     /// <summary>Version of the reflection bridge contract.</summary>
-    public const int ApiVersion = 1;
+    public static int ApiVersion => 1;
 
     private static readonly MethodInfo AddConfigEntryDefinition =
         typeof(global::ConditionalConfigSync.ConditionalConfigSync)
