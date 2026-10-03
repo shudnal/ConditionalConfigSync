@@ -40,16 +40,30 @@ For the 1.0.9 remote-consumer capability work started on 2026-09-21, the authori
 
 ### Current release identity
 
-- Package version: `1.0.9`
+- Package version: `1.0.10`
 - CCS wire protocol: `1`
 - Disconnect-report subformat: `1`
 - Core `AssemblyVersion`: `1.0.0.0`
-- Core and plugin file/informational version: `1.0.9`
+- Core and plugin file/informational version: `1.0.10`
 - BepInEx GUID and Harmony owner: `_shudnal.ConditionalConfigSync`
 - Jotunn Harmony owner used only for patch ordering: `com.jotunn.jotunn`
 - ServerSync Harmony owner used only for patch ordering: `org.bepinex.helpers.ServerSync`
 
 The additional package-version string in the ordinary version handshake is an optional trailing protocol-1 field. It does not justify a CCS protocol bump. The disconnect report is a separate best-effort RPC with its own internal format version and likewise does not change the main protocol.
+
+### 1.0.10 optional soft-dependency integration
+
+Version 1.0.10 adds the official *Conditional* Conditional Config Sync integration path for mods that remain fully functional without CCS but should automatically gain synchronization when CCS is installed locally.
+
+The consumer-facing `ConditionalConfigSync.API` adapter has no compile-time reference to either CCS runtime assembly. Authors may copy `ConditionalConfigSyncAPI.cs` directly into their project or build/reference `ConditionalConfigSync.API.dll` and ILRepack/internalize it into the final mod DLL. The API DLL is a developer artifact and must not become another separately distributed runtime dependency.
+
+Consumers declare `_shudnal.ConditionalConfigSync` as a BepInEx soft dependency for load ordering. The adapter always returns ordinary BepInEx `ConfigEntry<T>` values. When the active CCS bootstrap exposes bridge API version 1 and the shared runtime is ready, those same entries are registered with CCS; otherwise they remain ordinary local BepInEx settings. This optional mode is valid only when unsynchronized local fallback is acceptable for the mod.
+
+Discovery is anchored to `Chainloader.PluginInfos[_shudnal.ConditionalConfigSync].Instance` and reflects `ConditionalConfigSync.SoftDependencyBridge` from that instantiated bootstrap assembly. The adapter never scans AppDomain assemblies by name, so passive same-named CCS copies loaded by metadata scanners such as AzuAntiCheat cannot become accidental integration targets.
+
+The reflection bridge deliberately exposes only primitive/string/BepInEx contracts: bridge API version, runtime readiness, consumer creation, config registration, and locking-entry registration. CCS enum values cross the bridge by stable names rather than numeric layout. Direct compile-time consumers of `ConditionalConfigSync.dll` continue to require the normal hard BepInEx dependency.
+
+This release does not change CCS protocol `1` or the stable core `AssemblyVersion = 1.0.0.0`.
 
 ### 1.0.9 remote consumer capability API
 
