@@ -255,7 +255,7 @@ Reference only:
 ConditionalConfigSync.dll
 ```
 
-Then declare the standalone BepInEx plugin as a hard dependency:
+For direct compile-time API use, declare the standalone BepInEx plugin as a hard dependency:
 
 ```csharp
 [BepInDependency(
@@ -280,6 +280,58 @@ internal static readonly ConfigSync configSync = new ConfigSync(pluginID)
     ModRequired = true
 };
 ```
+
+### Optional soft dependency integration
+
+Mods that remain fully functional without synchronized configuration may use the official source/ILRepack adapter instead of referencing `ConditionalConfigSync.dll`.
+
+The adapter is maintained in:
+
+```text
+ConditionalConfigSync.API/ConditionalConfigSyncAPI.cs
+```
+
+You can either copy that source file directly into the mod project or reference `ConditionalConfigSync.API.dll` during development and ILRepack/internalize it into the final mod DLL. Do not distribute `ConditionalConfigSync.API.dll` as a separate runtime dependency.
+
+Declare CCS as a soft BepInEx dependency so it is ordered before the consumer when installed while the consumer still loads without CCS:
+
+```csharp
+[BepInDependency(
+    ConditionalConfigSyncAPI.ConfigSync.PluginGuid,
+    BepInDependency.DependencyFlags.SoftDependency)]
+```
+
+The adapter always returns ordinary BepInEx `ConfigEntry<T>` objects. When a compatible CCS runtime is active, those same entries are registered with CCS through the official reflection bridge; when CCS is absent or the bridge is unavailable, they remain ordinary local BepInEx settings.
+
+```csharp
+var optionalSync = new ConditionalConfigSyncAPI.ConfigSync(
+    pluginID,
+    pluginName,
+    pluginVersion,
+    minimumRequiredVersion: minimumCompatibleVersion,
+    modRequired: false,
+    logger: Logger);
+
+ConfigEntry<bool> useDurability = optionalSync.Bind(
+    Config,
+    "Gameplay",
+    "Use durability",
+    true,
+    "Enable durability.",
+    ConditionalConfigSyncAPI.SyncMode.AlwaysServerControlled);
+
+ConfigEntry<KeyboardShortcut> snappingKey = optionalSync.Bind(
+    Config,
+    "Controls",
+    "Snapping key",
+    new KeyboardShortcut(KeyCode.LeftShift),
+    "Local snapping key.",
+    ConditionalConfigSyncAPI.SyncMode.AlwaysClientControlled);
+```
+
+The helper resolves the bridge through the active BepInEx plugin instance for `_shudnal.ConditionalConfigSync`; it does not scan `AppDomain` assemblies by name. Passive copies loaded by metadata scanners therefore cannot be selected accidentally.
+
+This mode is appropriate only when local unsynchronized fallback is a valid operating mode. If the mod requires synchronized settings for correct gameplay or network behavior, use the normal hard dependency instead.
 
 ### Requiring the mod on the remote side
 
