@@ -1,6 +1,6 @@
 # Conditional Config Sync API
 
-This project is the optional-integration adapter for mods that should continue to work when Conditional Config Sync (CCS) is not installed.
+This project is the optional-integration adapter for mods that should continue to work when Conditional Config Sync (CCS) is not installed. Full optional integration requires **CCS 1.0.10 or newer**.
 
 It intentionally has **no compile-time reference to ConditionalConfigSync.dll**. It depends only on BepInEx and resolves the official reflection bridge from the already active CCS BepInEx plugin.
 
@@ -23,13 +23,16 @@ In both cases declare CCS as a soft BepInEx dependency on your plugin:
 
 This gives BepInEx the correct startup ordering when CCS is installed while still allowing the mod to load when CCS is absent.
 
+The minimum CCS version for this optional bridge is **1.0.10**. BepInEx 5 cannot combine a minimum version with `SoftDependency`: its versioned dependency constructor is always hard. The adapter therefore checks the installed CCS plugin version at runtime. CCS 1.0.5-1.0.9 are treated like CCS being absent and remain local-only.
+
 ## Behavior
 
 The adapter always creates normal BepInEx `ConfigEntry<T>` objects.
 
 - CCS absent: entries remain ordinary local BepInEx settings.
-- Compatible CCS installed: the same entries are registered with CCS and participate in synchronization/policy.
-- CCS installed but the optional bridge is unavailable or incompatible: the adapter falls back to local BepInEx behavior and can log the reason through the supplied plugin logger.
+- CCS 1.0.5-1.0.9: entries remain ordinary local BepInEx settings; the optional bridge is not activated.
+- CCS 1.0.10 or newer: the same entries are registered with CCS and participate in synchronization/policy.
+- CCS 1.0.10+ with an unavailable or incompatible bridge: the adapter falls back to local BepInEx behavior and can log the reason through the supplied plugin logger.
 
 Discovery never scans `AppDomain` for an assembly named `ConditionalConfigSync`. It resolves the plugin through the BepInEx GUID and reflects only the bridge from that active plugin assembly. Passive copies loaded by tools such as AzuAntiCheat therefore cannot be selected accidentally.
 
