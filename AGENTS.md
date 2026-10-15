@@ -1,14 +1,24 @@
 # Repository guidance
 
-## Current review work
+## Working scope
 
-- Use `fix/full-repository-review-20260908` for this review and its follow-up corrections. It starts from `master` at `d0dcaa36fd6bc19e424cf2b092a7b926102f0fef`.
+- Use the branch or source archive specified by the maintainer for the current task. Do not carry branch restrictions from completed reviews into new work.
 - Do not use PR #1 or its head branch as a baseline. That branch is broken. Its individual observations may be checked against the current source only after an independent review.
-- Do not change package versions, assembly versions, the wire protocol, or any CHANGELOG copy. Do not add new public features as part of the review.
+- Keep review-only work within the agreed scope. Do not add unrelated public features.
 - Keep repository content, comments, diagnostics, documentation, and commit/PR text in English.
 - Do not build, run, or test the Valheim mod in the assistant environment. Source inspection and static repository checks are allowed; runtime validation belongs to the maintainer's game environment.
 - Read `PROJECT_CONTEXT.md` for design constraints. Source code is authoritative for the actual implementation.
 - When game implementation details are needed, first read `shudnal/assemblies_combined`.
+
+## Release policy
+
+Do not change package versions or changelog entries unless the maintainer explicitly requests release preparation.
+
+During review, treat version and changelog changes included in the maintainer-approved release scope as intentional. Check their consistency instead of reporting the version bump itself as a defect.
+
+Record requested release preparation in the PR description so reviewers can see the current scope.
+
+Keep the core `AssemblyVersion` stable for compatible updates. Change the wire protocol only when the network format becomes incompatible.
 
 ## Review guidelines
 
