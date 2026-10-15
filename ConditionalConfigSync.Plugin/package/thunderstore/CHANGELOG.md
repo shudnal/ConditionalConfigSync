@@ -1,3 +1,6 @@
+# 1.0.11
+* improved config sync reliability on slow connections by allowing transfers to continue while they make progress. Update CCS on both the server and affected clients for the full improvement.
+
 # 1.0.10
 * added official *Conditional* Conditional Config Sync soft-dependency integration, allowing mods to keep ordinary BepInEx configuration when CCS is absent and automatically synchronize the same config entries when CCS is installed
 * added the source/ILRepack-friendly `ConditionalConfigSync.API` adapter with transparent `Bind`, existing-entry registration, locking-entry support, runtime detection, and graceful local-only fallback without a compile-time CCS dependency

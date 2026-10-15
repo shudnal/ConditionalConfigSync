@@ -3,13 +3,20 @@
 This note supplements the transport and compatibility sections in `PROJECT_CONTEXT.md`.
 The change starts from `master` commit `3b0adea29f265f65a5a0bb09af7767ac0c6ffc27`.
 
+## Release 1.0.11
+
+Config sync is more reliable on slow connections. Transfers can continue while they make progress, rather than failing only because they take longer.
+Update CCS to 1.0.11 or newer on both the server and affected clients for the full improvement.
+Older compatible CCS versions can still connect, but retain their previous waiting rules.
+No new settings are required. Other mods do not need to be rebuilt, and the optional API still requires CCS 1.0.10 or newer.
+
 ## Scope
 
 Keep the existing packet format, RPC names, admission checks, queue ordering, and size and memory limits.
 Change only how CCS decides that a send wait or an incomplete fragmented package has stopped making progress.
 There are no new configuration files, negotiated timeout values, RPCs, or application-level acknowledgements.
 
-Package version remains 1.0.10, CCS protocol remains 1, core `AssemblyVersion` remains 1.0.0.0, and the soft-dependency bridge contract remains 1.
+Package version is 1.0.11, CCS protocol remains 1, core `AssemblyVersion` remains 1.0.0.0, and the soft-dependency bridge contract remains 1.
 Existing consumer mods do not need to be rebuilt for this transport change.
 
 ## Waiting to send
