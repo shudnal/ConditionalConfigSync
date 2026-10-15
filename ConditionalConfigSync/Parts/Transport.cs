@@ -321,6 +321,10 @@ public partial class ConditionalConfigSync
 
     private const int maximumSendQueueSize = 20000;
 
+    private const int SendQueueInactivityTimeoutSeconds = 30;
+
+    private const int FragmentInactivityTimeoutSeconds = 60;
+
     private const int compressMinSize = 10000;
 
     private const int maxPackageEntries = 8192;
@@ -349,7 +353,8 @@ public partial class ConditionalConfigSync
 
     private readonly Dictionary<string, long> configValueCacheSenders = new();
 
-    private readonly List<KeyValuePair<long, string>> cacheExpirations = new(); // avoid leaking memory
+    // Deadlines use Stopwatch ticks, not wall-clock time. One deadline is retained per incomplete package.
+    private readonly Dictionary<string, long> cacheExpirations = new();
 
     private void RemoveFragmentAssembly(string cacheKey)
     {
@@ -357,7 +362,18 @@ public partial class ConditionalConfigSync
         configValueCacheExpectedFragments.Remove(cacheKey);
         configValueCacheBytes.Remove(cacheKey);
         configValueCacheSenders.Remove(cacheKey);
-        cacheExpirations.RemoveAll(kv => kv.Value == cacheKey);
+        cacheExpirations.Remove(cacheKey);
+    }
+
+    private void RemoveExpiredFragmentAssemblies(string? preservedCacheKey = null)
+    {
+        long now = Stopwatch.GetTimestamp();
+        foreach (string expiredKey in cacheExpirations
+            .Where(kv => kv.Key != preservedCacheKey && kv.Value < now)
+            .Select(kv => kv.Key).ToArray())
+        {
+            RemoveFragmentAssembly(expiredKey);
+        }
     }
 
     private int GetFragmentCacheBytesForSender(long sender)
@@ -492,6 +508,7 @@ public partial class ConditionalConfigSync
     {
         bool receivedFromServer = !isServer && !clientUpdate;
         string? activeFragmentCacheKey = null;
+        bool fragmentCacheSwept = false;
         lastHandledPackageWasFull = false;
         bool processingStarted = false;
         bool wasProcessingServerUpdate = ProcessingServerUpdate;
@@ -502,11 +519,6 @@ public partial class ConditionalConfigSync
         try
         {
             bool senderIsAdmin = !isServer || !clientUpdate || IsSenderAdmin(sender);
-
-            foreach (string expiredKey in cacheExpirations.Where(kv => kv.Key < DateTimeOffset.Now.Ticks).Select(kv => kv.Value).Distinct().ToArray())
-            {
-                RemoveFragmentAssembly(expiredKey);
-            }
 
             byte packageFlags = GameReflection.PackageReadByte(package);
             string senderDescription = receivedFromServer ? "server" : FormatClient(sender);
@@ -535,6 +547,12 @@ public partial class ConditionalConfigSync
                     return false;
                 }
 
+                // A continuation may already be queued after a long local frame. Preserve this candidate
+                // until the existing fragment checks accept or reject it; unrelated expired packages still
+                // release their cache budget before this fragment is admitted.
+                RemoveExpiredFragmentAssemblies(cacheKey);
+                fragmentCacheSwept = true;
+
                 if (!configValueCache.TryGetValue(cacheKey, out SortedDictionary<int, byte[]> dataFragments))
                 {
                     if (GetFragmentAssemblyCountForSender(sender) >= maxFragmentAssembliesPerSender)
@@ -555,7 +573,6 @@ public partial class ConditionalConfigSync
                     configValueCacheExpectedFragments[cacheKey] = fragments;
                     configValueCacheBytes[cacheKey] = 0;
                     configValueCacheSenders[cacheKey] = sender;
-                    cacheExpirations.Add(new KeyValuePair<long, string>(DateTimeOffset.Now.AddSeconds(60).Ticks, cacheKey));
                 }
                 else if (!configValueCacheExpectedFragments.TryGetValue(cacheKey, out int expectedFragments) || expectedFragments != fragments)
                 {
@@ -585,6 +602,9 @@ public partial class ConditionalConfigSync
 
                 dataFragments[fragment] = fragmentData;
                 configValueCacheBytes[cacheKey] = assemblyBytes + fragmentData.Length;
+                // Only a new, valid fragment of this package extends its inactivity window.
+                cacheExpirations[cacheKey] = Stopwatch.GetTimestamp()
+                    + FragmentInactivityTimeoutSeconds * Stopwatch.Frequency;
 
                 if (dataFragments.Count < fragments)
                 {
@@ -609,6 +629,11 @@ public partial class ConditionalConfigSync
 
                 package = GameReflection.NewPackage(combined);
                 packageFlags = GameReflection.PackageReadByte(package);
+            }
+            else
+            {
+                RemoveExpiredFragmentAssemblies();
+                fragmentCacheSwept = true;
             }
 
             ProcessingServerUpdate = true;
@@ -718,6 +743,11 @@ public partial class ConditionalConfigSync
         }
         finally
         {
+            if (!fragmentCacheSwept && generation == transportGeneration)
+            {
+                // Malformed/oversized packets still trigger receive-driven cleanup, but never renew a deadline.
+                RemoveExpiredFragmentAssemblies();
+            }
             if (canonicalSlot != null)
             {
                 ReleaseSendSlot(canonicalSlot);
@@ -929,14 +959,33 @@ public partial class ConditionalConfigSync
 
         IEnumerable<bool> waitForQueue()
         {
-            float timeout = Time.realtimeSinceStartup + 30;
+            long waitStartedAt = Stopwatch.GetTimestamp();
+            long lastProgressAt = waitStartedAt;
+            int previousQueueSize = -1;
             while (IsCurrentPeerSend(peer, rpc, slot)
-                && GameReflection.GetPeerSocket(peer) is { } peerSocket
-                && GameReflection.SocketGetSendQueueSize(peerSocket) > maximumSendQueueSize)
+                && GameReflection.GetPeerSocket(peer) is { } peerSocket)
             {
-                if (Time.realtimeSinceStartup > timeout)
+                int queueSize = GameReflection.SocketGetSendQueueSize(peerSocket);
+                if (queueSize <= maximumSendQueueSize)
                 {
-                    DebugWarning("Network", $"Disconnecting {FormatPeer(peer)} after 30 seconds config sending timeout");
+                    yield break;
+                }
+
+                long now = Stopwatch.GetTimestamp();
+                // Observe progress before checking time, including the first update after a long local frame.
+                // This is the connection's shared queue: growth or merely remaining connected is not progress.
+                if (previousQueueSize < 0 || queueSize < previousQueueSize)
+                {
+                    lastProgressAt = now;
+                }
+                previousQueueSize = queueSize;
+
+                if (now - lastProgressAt > SendQueueInactivityTimeoutSeconds * Stopwatch.Frequency)
+                {
+                    double waitedSeconds = (now - waitStartedAt) / (double)Stopwatch.Frequency;
+                    DebugWarning("Network",
+                        $"Disconnecting {FormatPeer(peer)} after {SendQueueInactivityTimeoutSeconds} seconds without observed send-queue progress " +
+                        $"(queue={queueSize}, resumeThreshold={maximumSendQueueSize}, waited={waitedSeconds:F1}s)");
                     GameReflection.InvokeRpc(rpc, "Error", (int)ZNet.ConnectionStatus.ErrorConnectFailed);
                     GameReflection.Disconnect(peer, slot.Session);
                     yield break;
